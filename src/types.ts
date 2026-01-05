@@ -1,18 +1,12 @@
-export interface Profile {
-    id: string;
-    email?: string | null;
-    linkedin_slug?: string | null;
-    phone_e164?: string | null;
-    data: Record<string, any>; // JSONB
-    created_at?: string;
-    updated_at?: string;
-}
+import { Profile as PrismaProfile, Prisma } from '@prisma/client';
+
+export type Profile = PrismaProfile;
 
 export interface CreateProfileParams {
     email?: string | null;
     linkedin_slug?: string | null;
     phone_e164?: string | null;
-    data: Record<string, any>;
+    data?: Prisma.InputJsonValue;
 }
 
 export interface ProfileResolution {

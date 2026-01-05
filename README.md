@@ -9,6 +9,7 @@ Service to ingest, normalize, and enrich identity data (Email, LinkedIn, Phone).
   - Phone numbers (E.164 and national formats)
 - **Identity Resolution**: Resolves profiles by Email > LinkedIn > Phone.
 - **Data Merging**: Merges JSON data safely.
+- **ORM**: Builds on **Prisma** for type-safe database interactions.
 
 ## Setup
 
@@ -25,11 +26,13 @@ Service to ingest, normalize, and enrich identity data (Email, LinkedIn, Phone).
    
    Required variables:
    - `PORT`: Server port (default 3000)
-   - `SUPABASE_URL`: Your Supabase Project URL
-   - `SUPABASE_ANON_KEY`: Your Supabase Anon Key
+   - `DATABASE_URL`: Postgres Connection String (e.g., `postgresql://user:pass@host:5432/db`)
 
 3. **Database Setup**:
-   Run the SQL found in `src/db/schema.sql` in your Supabase SQL Editor.
+   Push the schema to your database:
+   ```bash
+   npm run prisma:push
+   ```
 
 ## Usage
 
@@ -37,6 +40,16 @@ Service to ingest, normalize, and enrich identity data (Email, LinkedIn, Phone).
 ```bash
 npm run dev
 ```
+
+**Production Build**:
+```bash
+npm run build
+npm start
+```
+
+**Prisma Tools**:
+- `npm run prisma:studio`: Open database GUI.
+- `npm run prisma:generate`: Regenerate Prisma Client.
 
 **API Endpoints**:
 

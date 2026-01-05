@@ -1,0 +1,23 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Profile {
+  id            String   @id @default(uuid()) @db.Uuid
+  email         String?  @unique
+  linkedin_slug String?  @unique
+  phone_e164    String?  @unique
+  data          Json     @default("{}")
+  created_at    DateTime @default(now()) @db.Timestamptz(6)
+  updated_at    DateTime @updatedAt @db.Timestamptz(6)
+
+  @@index([email])
+  @@index([linkedin_slug])
+  @@index([phone_e164])
+  @@map("profiles")
+}
