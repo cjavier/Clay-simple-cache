@@ -22,3 +22,16 @@ model Profile {
   @@index([phone_e164])
   @@map("profiles")
 }
+
+model Company {
+  id            String   @id @default(uuid()) @db.Uuid
+  domain        String?  @unique
+  linkedin_slug String?  @unique
+  data          Json     @default("{}")
+  created_at    DateTime @default(now()) @db.Timestamptz(6)
+  updated_at    DateTime @updatedAt @db.Timestamptz(6)
+
+  @@index([domain])
+  @@index([linkedin_slug])
+  @@map("companies")
+}

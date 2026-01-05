@@ -77,3 +77,30 @@ export function normalizePhone(phone: string, defaultCountry: CountryCode = 'MX'
         return null;
     }
 }
+
+/**
+ * Normalizes domain: trim, toLowerCase, remove protocol/www
+ * e.g. "https://www.google.com/" -> "google.com"
+ */
+export function normalizeDomain(domain: string): string | null {
+    try {
+        let cleanDomain = domain.trim().toLowerCase();
+
+        // Remove protocol
+        if (cleanDomain.startsWith('http://')) cleanDomain = cleanDomain.slice(7);
+        if (cleanDomain.startsWith('https://')) cleanDomain = cleanDomain.slice(8);
+
+        // Remove www.
+        if (cleanDomain.startsWith('www.')) cleanDomain = cleanDomain.slice(4);
+
+        // Remove trailing slash
+        if (cleanDomain.endsWith('/')) cleanDomain = cleanDomain.slice(0, -1);
+
+        // Basic validation: should have at least one dot
+        if (!cleanDomain.includes('.')) return null;
+
+        return cleanDomain;
+    } catch (e) {
+        return null;
+    }
+}
