@@ -26,7 +26,8 @@ Service to ingest, normalize, and enrich identity data (Email, LinkedIn, Phone).
    
    Required variables:
    - `PORT`: Server port (default 3000)
-   - `DATABASE_URL`: Postgres Connection String (e.g., `postgresql://user:pass@host:5432/db`)
+   - `DATABASE_URL`: Connection Pool URL (Transaction Mode, Port 6543)
+   - `DIRECT_URL`: Direct Connection URL (Session Mode, Port 5432)
 
 3. **Database Setup**:
    Push the schema to your database:
