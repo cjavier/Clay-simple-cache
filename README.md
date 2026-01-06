@@ -1,13 +1,14 @@
 # Identity Cache & Enrichment API
 
-Service to ingest, normalize, and enrich identity data (Email, LinkedIn, Phone). It allows upserting profiles based on any normalized key and merging data into a unified profile.
+Service to ingest, normalize, and enrich identity data (Profiles & Companies). It allows upserting records based on normalized keys and merging data into a unified record.
 
 ## Features
-- **Normalization**: Automatically cleans and formats:
-  - Email (lowercase, trim)
-  - LinkedIn URLs (extracts slugs)
-  - Phone numbers (E.164 and national formats)
-- **Identity Resolution**: Resolves profiles by Email > LinkedIn > Phone.
+- **Profiles**:
+  - Normalization: Email, LinkedIn, Phone.
+  - Resolution: Email > LinkedIn > Phone.
+- **Companies**:
+  - Normalization: Domain (trim, lowercase, remove www/protocol), LinkedIn.
+  - Resolution: Domain > LinkedIn.
 - **Data Merging**: Merges JSON data safely.
 - **ORM**: Builds on **Prisma** for type-safe database interactions.
 
@@ -48,17 +49,19 @@ npm run build
 npm start
 ```
 
-**Prisma Tools**:
-- `npm run prisma:studio`: Open database GUI.
-- `npm run prisma:generate`: Regenerate Prisma Client.
-
 **API Endpoints**:
 
-- `POST /profiles`: Upsert/Enrich a profile.
-- `GET /profiles`: Query a profile by `email`, `linkedin`, or `phone`.
+- **Profiles**
+  - `POST /profiles`: Upsert/Enrich a profile.
+  - `GET /profiles`: Query by `email`, `linkedin`, or `phone`.
+
+- **Companies**
+  - `POST /companies`: Upsert/Enrich a company.
+  - `GET /companies`: Query by `domain` or `linkedin`.
 
 ## Testing Normalization
-Run the verification script:
+Run the verification scripts:
 ```bash
-npx ts-node src/verify_normalization.ts
+npx ts-node src/verify_normalization.ts # Profiles
+npx ts-node src/verify_companies.ts     # Companies
 ```
