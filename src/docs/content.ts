@@ -5,7 +5,7 @@ This API allows storing, retrieving, and resolving identity profiles (People) an
 It uses a "best-effort" resolution strategy based on multiple identifiers (Email, LinkedIn, Phone, Domain).
 
 ## Base URL
-\`http://<host>:<port>\`
+\`{{BASE_URL}}\`
 
 ## Endpoints
 

@@ -2,10 +2,14 @@ import { Request, Response } from 'express';
 import { apiDocumentation } from '../docs/content';
 
 export const docsController = {
-    async get(req: Request, res: Response): Promise<void> {
-        const safeContent = apiDocumentation.replace(/\`/g, '\\`').replace(/\$\{/g, '\\${');
+  async get(req: Request, res: Response): Promise<void> {
+    const baseUrl = req.protocol + '://' + req.get('host');
+    const safeContent = apiDocumentation
+      .replace('{{BASE_URL}}', baseUrl)
+      .replace(/`/g, '\\`')
+      .replace(/\$\{/g, '\\${');
 
-        const html = `
+    const html = `
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -26,6 +30,6 @@ export const docsController = {
 </body>
 </html>
 `;
-        res.send(html);
-    }
+    res.send(html);
+  }
 };
