@@ -42,7 +42,11 @@ export const profilesController = {
                 if (normalizedPhone?.e164 && !existingProfile.phone_e164) updates.phone_e164 = normalizedPhone.e164;
 
                 // Merge Data
-                const mergedData = profileService.mergeData(existingProfile.data, extraData);
+                const mergedData = profileService.mergeData(existingProfile.data, {
+                    ...extraData,
+                    ...(linkedin_url ? { linkedin_url } : {}),
+                    ...(normalizedPhone?.national ? { phone_national: normalizedPhone.national } : {})
+                });
                 updates.data = mergedData;
 
                 // Perform update if there are changes
@@ -58,7 +62,11 @@ export const profilesController = {
                     email: normalizedEmail,
                     linkedin_slug: normalizedLinkedin,
                     phone_e164: normalizedPhone?.e164,
-                    data: extraData
+                    data: {
+                        ...extraData,
+                        ...(linkedin_url ? { linkedin_url } : {}),
+                        ...(normalizedPhone?.national ? { phone_national: normalizedPhone.national } : {})
+                    }
                 });
                 finalProfileId = newProfile.id;
                 resolutionType = 'new';

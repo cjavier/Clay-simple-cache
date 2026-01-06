@@ -28,10 +28,12 @@ export function normalizeLinkedIn(url: string): string | null {
         const urlObj = new URL(cleanUrl);
         const pathSegments = urlObj.pathname.split('/').filter(Boolean);
 
-        // Find 'in' segment and get the next one
-        const inIndex = pathSegments.indexOf('in');
-        if (inIndex !== -1 && pathSegments[inIndex + 1]) {
-            return pathSegments[inIndex + 1];
+        // Find 'in', 'company', or 'school' segment and get the next one
+        const lookup = ['in', 'company', 'school'];
+        const foundIndex = pathSegments.findIndex(seg => lookup.includes(seg));
+
+        if (foundIndex !== -1 && pathSegments[foundIndex + 1]) {
+            return pathSegments[foundIndex + 1];
         }
 
         // Fallback? The requirement says "linkedin.com/in/juan-perez", so the above covers it.

@@ -37,7 +37,10 @@ export const companiesController = {
                 if (normalizedDomain && !existingCompany.domain) updates.domain = normalizedDomain;
                 if (normalizedLinkedin && !existingCompany.linkedin_slug) updates.linkedin_slug = normalizedLinkedin;
 
-                const mergedData = companyService.mergeData(existingCompany.data, extraData);
+                const mergedData = companyService.mergeData(existingCompany.data, {
+                    ...extraData,
+                    ...(linkedin_url ? { linkedin_url } : {})
+                });
                 updates.data = mergedData;
 
                 if (Object.keys(updates).length > 0) {
@@ -51,7 +54,10 @@ export const companiesController = {
                 const newCompany = await companyService.createCompany({
                     domain: normalizedDomain,
                     linkedin_slug: normalizedLinkedin,
-                    data: extraData
+                    data: {
+                        ...extraData,
+                        ...(linkedin_url ? { linkedin_url } : {})
+                    }
                 });
                 finalCompanyId = newCompany.id;
                 resolutionType = 'new';
