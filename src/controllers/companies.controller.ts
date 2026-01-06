@@ -90,9 +90,10 @@ export const companiesController = {
             }
 
             res.json({
+                ...company.data as object,
+                id: company.id,
                 domain: company.domain,
                 linkedin_slug: company.linkedin_slug,
-                data: company.data,
                 updated_at: company.updated_at
             });
 

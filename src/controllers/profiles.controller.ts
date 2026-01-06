@@ -110,10 +110,11 @@ export const profilesController = {
             }
 
             res.json({
+                ...profile.data as object,
+                id: profile.id,
                 email: profile.email,
                 linkedin_slug: profile.linkedin_slug,
                 phone: profile.phone_e164,
-                data: profile.data,
                 updated_at: profile.updated_at
             });
 
