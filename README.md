@@ -51,6 +51,8 @@ npm start
 
 **API Endpoints**:
 
+See full documentation at `GET /docs/api` or visit `http://localhost:3000/docs/api` locally.
+
 - **Profiles**
   - `POST /profiles`: Upsert/Enrich a profile.
   - `GET /profiles`: Query by `email`, `linkedin`, or `phone`.

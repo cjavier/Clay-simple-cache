@@ -4,9 +4,9 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "dev": "nodemon src/index.ts",
+    "dev": "npx prisma generate && npx prisma db push && nodemon src/index.ts",
     "build": "tsc",
-    "start": "node dist/index.js",
+    "start": "npx prisma generate && npx prisma db push && node dist/index.js",
     "prisma:generate": "prisma generate",
     "prisma:push": "prisma db push",
     "prisma:studio": "prisma studio",
