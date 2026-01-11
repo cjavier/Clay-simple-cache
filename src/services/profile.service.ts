@@ -7,8 +7,8 @@ export const profileService = {
      * Find a profile by any of the keys.
      * Tries all provided keys and returns the best match (or first found).
      */
-    async findProfile(keys: { email?: string; linkedin_slug?: string; phone_e164?: string }): Promise<{ profile: any | null; resolvedBy: string | null }> {
-        const { email, linkedin_slug, phone_e164 } = keys;
+    async findProfile(keys: { email?: string; linkedin_slug?: string; linkedin_url?: string; phone_e164?: string }): Promise<{ profile: any | null; resolvedBy: string | null }> {
+        const { email, linkedin_slug, linkedin_url, phone_e164 } = keys;
 
         let foundProfile: any | null = null;
         let resolvedBy: string | null = null;
@@ -22,12 +22,16 @@ export const profileService = {
             }
         }
 
-        // If no email match, or if we want to prioritize other identifiers over a non-existent email,
-        // check for linkedin_slug. If an email match was found, this will only override if the
-        // linkedin_slug points to the same profile or if we decide to prioritize linkedin_slug
-        // over an email match (which is not the current logic, email is highest).
-        // The instruction implies collecting all, then deciding.
-        // Given the return type, we still need to pick one. The original priority is maintained.
+        // Check for linkedin_url match (newly added column)
+        if (!foundProfile && linkedin_url) {
+            const profile = await prisma.profile.findUnique({ where: { linkedin_url } });
+            if (profile) {
+                foundProfile = profile;
+                resolvedBy = 'linkedin_url';
+            }
+        }
+
+        // Check for linkedin_slug
         if (!foundProfile && linkedin_slug) {
             const profile = await prisma.profile.findUnique({ where: { linkedin_slug } });
             if (profile) {
@@ -66,6 +70,7 @@ export const profileService = {
             data: {
                 email: params.email,
                 linkedin_slug: params.linkedin_slug,
+                linkedin_url: params.linkedin_url,
                 phone_e164: params.phone_e164,
                 data: params.data ?? {},
             }

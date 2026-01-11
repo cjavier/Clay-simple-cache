@@ -9,12 +9,15 @@ export const profilesController = {
      */
     async upsert(req: Request, res: Response): Promise<void> {
         try {
-            const { email, linkedin_url, phone, ...extraData } = req.body;
+            const { email, linkedin_url, linkedin_profile, phone, ...extraData } = req.body;
 
             // 1. Normalize Keys
             const normalizedEmail = email ? normalizeEmail(email as string) : null;
-            const normalizedLinkedin = linkedin_url ? normalizeLinkedIn(linkedin_url as string) : null;
+            const normalizedLinkedin = (linkedin_url || linkedin_profile) ? normalizeLinkedIn((linkedin_url || linkedin_profile) as string) : null;
             const normalizedPhone = phone ? normalizePhone(phone as string) : null;
+
+            // Full LinkedIn URL to store (if provided)
+            const fullLinkedinUrl = (linkedin_url || linkedin_profile) as string | undefined;
 
             if (!normalizedEmail && !normalizedLinkedin && !normalizedPhone) {
                 res.status(400).json({ error: 'At least one identity key (email, linkedin_url, phone) is required.' });
@@ -25,6 +28,7 @@ export const profilesController = {
             const { profile: existingProfile, resolvedBy } = await profileService.findProfile({
                 email: normalizedEmail || undefined,
                 linkedin_slug: normalizedLinkedin || undefined,
+                linkedin_url: fullLinkedinUrl || undefined,
                 phone_e164: normalizedPhone?.e164 || undefined
             });
 
@@ -40,13 +44,14 @@ export const profilesController = {
                 // We ALWAYS attempt to fill these if they are missing in the DB but provided in the request
                 if (normalizedEmail && !existingProfile.email) updates.email = normalizedEmail;
                 if (normalizedLinkedin && !existingProfile.linkedin_slug) updates.linkedin_slug = normalizedLinkedin;
+                if (fullLinkedinUrl && !existingProfile.linkedin_url) updates.linkedin_url = fullLinkedinUrl;
                 if (normalizedPhone?.e164 && !existingProfile.phone_e164) updates.phone_e164 = normalizedPhone.e164;
 
                 // Merge Data
                 // The requirements say we definitely need to include as many identifiable data as possible
                 const mergedData = profileService.mergeData(existingProfile.data, {
                     ...extraData,
-                    ...(linkedin_url ? { linkedin_url } : {}),
+                    ...(fullLinkedinUrl ? { linkedin_url: fullLinkedinUrl } : {}),
                     ...(normalizedPhone?.national ? { phone_national: normalizedPhone.national } : {})
                 });
                 updates.data = mergedData;
@@ -63,10 +68,11 @@ export const profilesController = {
                 const newProfile = await profileService.createProfile({
                     email: normalizedEmail,
                     linkedin_slug: normalizedLinkedin,
+                    linkedin_url: fullLinkedinUrl,
                     phone_e164: normalizedPhone?.e164,
                     data: {
                         ...extraData,
-                        ...(linkedin_url ? { linkedin_url } : {}),
+                        ...(fullLinkedinUrl ? { linkedin_url: fullLinkedinUrl } : {}),
                         ...(normalizedPhone?.national ? { phone_national: normalizedPhone.national } : {})
                     }
                 });
@@ -95,22 +101,30 @@ export const profilesController = {
             const { email, linkedin, phone } = req.query;
 
             const normalizedEmail = email ? normalizeEmail(email as string) : undefined;
-            const normalizedLinkedin = linkedin ? (normalizeLinkedIn(linkedin as string) || undefined) : undefined;
-            // If passing just a slug, normalizeLinkedIn might fail if it expects URL structure, 
-            // but my implementation handles slugs too.
-            // If the user passes a slug "ana-lopez", normalizeLinkedIn will return "ana-lopez".
+
+            // For linkedin, we'll try matching by full URL first, then by slug
+            let linkedinUrl = undefined;
+            let linkedinSlug = undefined;
+
+            if (linkedin) {
+                const li = linkedin as string;
+                if (li.includes('linkedin.com/')) {
+                    linkedinUrl = li;
+                }
+                // Also always try getting the slug anyway
+                linkedinSlug = normalizeLinkedIn(li) || undefined;
+            }
 
             let phoneE164 = undefined;
             if (phone) {
-                // Strategy: "Guardar siempre con LADA... Si viene sin +, intentar +<default_country>..."
-                // The implementation of normalizePhone handles default country (MX).
                 const p = normalizePhone(phone as string);
                 if (p) phoneE164 = p.e164;
             }
 
             const { profile } = await profileService.findProfile({
                 email: normalizedEmail,
-                linkedin_slug: normalizedLinkedin,
+                linkedin_url: linkedinUrl,
+                linkedin_slug: linkedinSlug,
                 phone_e164: phoneE164
             });
 

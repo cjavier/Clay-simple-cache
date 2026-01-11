@@ -6,6 +6,7 @@ export type Company = PrismaCompany;
 export interface CreateProfileParams {
     email?: string | null;
     linkedin_slug?: string | null;
+    linkedin_url?: string | null;
     phone_e164?: string | null;
     data?: Prisma.InputJsonValue;
 }
