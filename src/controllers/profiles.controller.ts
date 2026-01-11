@@ -37,11 +37,13 @@ export const profilesController = {
                 const updates: any = {};
 
                 // Fill missing keys
+                // We ALWAYS attempt to fill these if they are missing in the DB but provided in the request
                 if (normalizedEmail && !existingProfile.email) updates.email = normalizedEmail;
                 if (normalizedLinkedin && !existingProfile.linkedin_slug) updates.linkedin_slug = normalizedLinkedin;
                 if (normalizedPhone?.e164 && !existingProfile.phone_e164) updates.phone_e164 = normalizedPhone.e164;
 
                 // Merge Data
+                // The requirements say we definitely need to include as many identifiable data as possible
                 const mergedData = profileService.mergeData(existingProfile.data, {
                     ...extraData,
                     ...(linkedin_url ? { linkedin_url } : {}),

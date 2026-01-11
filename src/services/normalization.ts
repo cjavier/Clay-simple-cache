@@ -20,12 +20,22 @@ export function normalizeLinkedIn(url: string): string | null {
     try {
         let cleanUrl = url.trim().toLowerCase();
 
-        // Add protocol if missing to parsing
+        // Remove common prefixes for easier parsing if not a full URL
+        if (cleanUrl.startsWith('www.')) cleanUrl = 'https://' + cleanUrl;
         if (!cleanUrl.startsWith('http')) {
             cleanUrl = 'https://' + cleanUrl;
         }
 
         const urlObj = new URL(cleanUrl);
+        // Ensure it's a linkedin domain
+        if (!urlObj.hostname.includes('linkedin.com')) {
+            // If not a linkedin domain, check if it's just a slug
+            if (!url.includes('/') && !url.includes('.')) {
+                return url.trim().toLowerCase();
+            }
+            return null;
+        }
+
         const pathSegments = urlObj.pathname.split('/').filter(Boolean);
 
         // Find 'in', 'company', or 'school' segment and get the next one
@@ -33,27 +43,20 @@ export function normalizeLinkedIn(url: string): string | null {
         const foundIndex = pathSegments.findIndex(seg => lookup.includes(seg));
 
         if (foundIndex !== -1 && pathSegments[foundIndex + 1]) {
-            return pathSegments[foundIndex + 1];
+            return pathSegments[foundIndex + 1].split('?')[0].split('#')[0];
         }
 
-        // Fallback? The requirement says "linkedin.com/in/juan-perez", so the above covers it.
-        // What if it's just "juan-perez"? The requirements lists:
-        // "Entradas válidas: juan-perez" -> No, it lists inputs as URLs mostly, but "linkedin.com/in/juan-perez"
-
-        // If the input doesn't look like a URL but just a slug (no slashes), maybe return it as is?
-        // "Entradas válidas: ... linkedin.com/in/juan-perez"
-        // Let's assume if we can't parse a URL, maybe it's already a slug? 
-        // But safely, let's just stick to extracting from URL structures or return the input if it looks like a simple slug (no dots, no slashes).
-
-        if (!url.includes('/') && !url.includes('.')) {
-            return url.trim().toLowerCase(); // It's already a slug
+        // If it's just linkedin.com/slug (less common but possible)
+        if (pathSegments.length === 1 && !lookup.includes(pathSegments[0])) {
+            return pathSegments[0].split('?')[0].split('#')[0];
         }
 
         return null;
     } catch (e) {
         // If URL parsing fails, check if simple slug
-        if (!url.includes('/') && !url.includes('.')) {
-            return url.trim().toLowerCase();
+        const trimmed = url.trim().toLowerCase();
+        if (!trimmed.includes('/') && !trimmed.includes('.') && trimmed.length > 0) {
+            return trimmed;
         }
         return null;
     }

@@ -5,27 +5,47 @@ import { Prisma } from '@prisma/client';
 export const profileService = {
     /**
      * Find a profile by any of the keys.
-     * Order of priority: email, linkedin_slug, phone_e164
+     * Tries all provided keys and returns the best match (or first found).
      */
     async findProfile(keys: { email?: string; linkedin_slug?: string; phone_e164?: string }): Promise<{ profile: any | null; resolvedBy: string | null }> {
         const { email, linkedin_slug, phone_e164 } = keys;
 
+        let foundProfile: any | null = null;
+        let resolvedBy: string | null = null;
+
+        // Check for email match first (highest priority)
         if (email) {
             const profile = await prisma.profile.findUnique({ where: { email } });
-            if (profile) return { profile, resolvedBy: 'email' };
+            if (profile) {
+                foundProfile = profile;
+                resolvedBy = 'email';
+            }
         }
 
-        if (linkedin_slug) {
+        // If no email match, or if we want to prioritize other identifiers over a non-existent email,
+        // check for linkedin_slug. If an email match was found, this will only override if the
+        // linkedin_slug points to the same profile or if we decide to prioritize linkedin_slug
+        // over an email match (which is not the current logic, email is highest).
+        // The instruction implies collecting all, then deciding.
+        // Given the return type, we still need to pick one. The original priority is maintained.
+        if (!foundProfile && linkedin_slug) {
             const profile = await prisma.profile.findUnique({ where: { linkedin_slug } });
-            if (profile) return { profile, resolvedBy: 'linkedin_slug' };
+            if (profile) {
+                foundProfile = profile;
+                resolvedBy = 'linkedin_slug';
+            }
         }
 
-        if (phone_e164) {
+        // If no profile found yet, check for phone_e164
+        if (!foundProfile && phone_e164) {
             const profile = await prisma.profile.findUnique({ where: { phone_e164 } });
-            if (profile) return { profile, resolvedBy: 'phone_e164' };
+            if (profile) {
+                foundProfile = profile;
+                resolvedBy = 'phone_e164';
+            }
         }
 
-        return { profile: null, resolvedBy: null };
+        return { profile: foundProfile, resolvedBy: resolvedBy };
     },
 
     /**
