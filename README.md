@@ -4,8 +4,8 @@ Service to ingest, normalize, and enrich identity data (Profiles & Companies). I
 
 ## Features
 - **Profiles**:
-  - Normalization: Email, LinkedIn, Phone.
-  - Resolution: Email > LinkedIn > Phone.
+  - Normalization: Email, LinkedIn (Slug & Full URL), Phone.
+  - Resolution: Email > LinkedIn URL > LinkedIn Slug > Phone.
 - **Companies**:
   - Normalization: Domain (trim, lowercase, remove www/protocol), LinkedIn.
   - Resolution: Domain > LinkedIn.

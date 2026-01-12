@@ -16,11 +16,19 @@ It uses a "best-effort" resolution strategy based on multiple identifiers (Email
 | Field | Type | Required | Description |
 |---|---|---|---|
 | \`email\` | String | No* | Person's email. Will be lowercased. |
-| \`linkedin_url\` | String | No* | LinkedIn profile URL. Slug will be extracted. |
+| \`linkedin_url\` | String | No* | LinkedIn profile URL. Slug will be extracted and full URL stored. |
+| \`linkedin_profile\` | String | No* | Alias for \`linkedin_url\`. |
 | \`phone\` | String | No* | Phone number. Will be normalized to E.164. |
 
 ### 2. Get Profile
 **GET** \`/profiles\`
+
+**Query Parameters**:
+| Param | Description |
+|---|---|
+| \`email\` | Search by email. |
+| \`linkedin\` | Search by LinkedIn URL or slug. |
+| \`phone\` | Search by phone (E.164 or loose format). |
 
 **Response (JSON)**:
 \`\`\`json
