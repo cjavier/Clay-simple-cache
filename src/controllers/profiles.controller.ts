@@ -83,7 +83,19 @@ export const profilesController = {
             res.json({
                 status: 'ok',
                 resolved_by: resolutionType,
-                profile_id: finalProfileId
+                profile_id: finalProfileId,
+                saved_data: {
+                    id: finalProfileId,
+                    email: normalizedEmail,
+                    linkedin_slug: normalizedLinkedin,
+                    linkedin_url: fullLinkedinUrl,
+                    phone_e164: normalizedPhone?.e164,
+                    data: {
+                        ...extraData,
+                        ...(fullLinkedinUrl ? { linkedin_url: fullLinkedinUrl } : {}),
+                        ...(normalizedPhone?.national ? { phone_national: normalizedPhone.national } : {})
+                    }
+                }
             });
 
         } catch (error: any) {
@@ -129,7 +141,16 @@ export const profilesController = {
             });
 
             if (!profile) {
-                res.status(404).json({ error: 'Profile not found' });
+                res.status(200).json({
+                    result: null,
+                    message: "No records found",
+                    search_criteria: {
+                        email: normalizedEmail,
+                        linkedin_url: linkedinUrl,
+                        linkedin_slug: linkedinSlug,
+                        phone_e164: phoneE164
+                    }
+                });
                 return;
             }
 

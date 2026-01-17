@@ -66,7 +66,16 @@ export const companiesController = {
             res.json({
                 status: 'ok',
                 resolved_by: resolutionType,
-                company_id: finalCompanyId
+                company_id: finalCompanyId,
+                saved_data: {
+                    id: finalCompanyId,
+                    domain: normalizedDomain,
+                    linkedin_slug: normalizedLinkedin,
+                    data: {
+                        ...extraData,
+                        ...(linkedin_url ? { linkedin_url } : {})
+                    }
+                }
             });
 
         } catch (error: any) {
@@ -91,7 +100,14 @@ export const companiesController = {
             });
 
             if (!company) {
-                res.status(404).json({ error: 'Company not found' });
+                res.status(200).json({
+                    result: null,
+                    message: "No records found",
+                    search_criteria: {
+                        domain: normalizedDomain,
+                        linkedin_slug: normalizedLinkedin
+                    }
+                });
                 return;
             }
 
