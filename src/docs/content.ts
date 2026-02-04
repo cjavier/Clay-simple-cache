@@ -7,6 +7,17 @@ It uses a "best-effort" resolution strategy based on multiple identifiers (Email
 ## Base URL
 \`{{BASE_URL}}\`
 
+## Authentication
+All endpoints (except \`/health\` and \`/docs/api\`) require an API Key to be passed in the request headers.
+
+**Header**: \`x-api-key\`  
+**Value**: Your secret API Key (check your \`.env\` file or contact the administrator).
+
+Example Request:
+\`\`\`bash
+curl -H "x-api-key: your_secret_key" {{BASE_URL}}/profiles
+\`\`\`
+
 ## Endpoints
 
 ### 1. Upsert Profile
