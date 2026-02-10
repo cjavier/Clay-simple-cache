@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 
 export const authMiddleware = (req: Request, res: Response, next: NextFunction): void => {
-    const apiKey = req.headers['x-api-key'];
+    const authHeader = req.headers['authorization'];
     const validKey = process.env.API_KEY;
 
     if (!validKey) {
@@ -10,8 +10,14 @@ export const authMiddleware = (req: Request, res: Response, next: NextFunction):
         return;
     }
 
-    if (!apiKey || apiKey !== validKey) {
-        res.status(401).json({ error: 'Unauthorized: Invalid or missing API Key' });
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        res.status(401).json({ error: 'Unauthorized: Missing or malformed Authorization header' });
+        return;
+    }
+
+    const token = authHeader.slice(7);
+    if (token !== validKey) {
+        res.status(401).json({ error: 'Unauthorized: Invalid API Key' });
         return;
     }
 
