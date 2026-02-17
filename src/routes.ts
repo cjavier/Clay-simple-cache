@@ -7,6 +7,8 @@ import { authMiddleware } from './middleware/auth.middleware';
 
 const router = Router();
 
+router.get('/', (_req, res) => res.redirect('/docs/api'));
+
 router.post('/profiles', authMiddleware, profilesController.upsert);
 router.get('/profiles', authMiddleware, profilesController.get);
 
