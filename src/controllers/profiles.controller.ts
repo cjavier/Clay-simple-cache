@@ -110,7 +110,8 @@ export const profilesController = {
      */
     async get(req: Request, res: Response): Promise<void> {
         try {
-            const { email, linkedin, phone } = req.query;
+            const { email, linkedin, linkedin_url, phone } = req.query;
+            const linkedinParam = (linkedin || linkedin_url) as string | undefined;
 
             const normalizedEmail = email ? normalizeEmail(email as string) : undefined;
 
@@ -118,13 +119,11 @@ export const profilesController = {
             let linkedinUrl = undefined;
             let linkedinSlug = undefined;
 
-            if (linkedin) {
-                const li = linkedin as string;
-                if (li.includes('linkedin.com/')) {
-                    linkedinUrl = li;
+            if (linkedinParam) {
+                if (linkedinParam.includes('linkedin.com/')) {
+                    linkedinUrl = linkedinParam;
                 }
-                // Also always try getting the slug anyway
-                linkedinSlug = normalizeLinkedIn(li) || undefined;
+                linkedinSlug = normalizeLinkedIn(linkedinParam) || undefined;
             }
 
             let phoneE164 = undefined;
@@ -155,6 +154,7 @@ export const profilesController = {
             }
 
             res.json({
+                result: 1,
                 ...profile.data as object,
                 id: profile.id,
                 email: profile.email,

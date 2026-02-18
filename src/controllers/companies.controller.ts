@@ -89,10 +89,11 @@ export const companiesController = {
      */
     async get(req: Request, res: Response): Promise<void> {
         try {
-            const { domain, linkedin } = req.query;
+            const { domain, linkedin, linkedin_url } = req.query;
+            const linkedinParam = (linkedin || linkedin_url) as string | undefined;
 
             const normalizedDomain = domain ? normalizeDomain(domain as string) : undefined;
-            const normalizedLinkedin = linkedin ? (normalizeLinkedIn(linkedin as string) || undefined) : undefined;
+            const normalizedLinkedin = linkedinParam ? (normalizeLinkedIn(linkedinParam) || undefined) : undefined;
 
             const { company } = await companyService.findCompany({
                 domain: normalizedDomain || undefined,
@@ -112,6 +113,7 @@ export const companiesController = {
             }
 
             res.json({
+                result: 1,
                 ...company.data as object,
                 id: company.id,
                 domain: company.domain,
