@@ -492,6 +492,23 @@ describe("API Integration Tests", () => {
       expect(res.status).toBe(409);
       expect(res.body.error).toBe("client_already_exists");
     });
+
+    it("returns 409 (not 500) when a concurrent create hits the unique constraint", async () => {
+      // Passes the existence check (race), then create throws Prisma P2002.
+      mockPrisma.client.findUnique
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({ id: "cl1", handle: "acme", name: "Acme" });
+      mockPrisma.client.create.mockRejectedValue({ code: "P2002" });
+
+      const res = await request(app)
+        .post("/clients")
+        .set("Authorization", `Bearer ${API_KEY}`)
+        .send({ name: "Acme" });
+
+      expect(res.status).toBe(409);
+      expect(res.body.error).toBe("client_already_exists");
+      expect(res.body.client).toMatchObject({ handle: "acme" });
+    });
   });
 
   describe("GET /clients", () => {
@@ -599,12 +616,29 @@ describe("API Integration Tests", () => {
 
       expect(res.status).toBe(200);
       expect(res.body.added).toBe(1);
-      const inserted = mockPrisma.dncEntry.createMany.mock.calls[0][0].data;
-      expect(inserted[0]).toMatchObject({
+      const call = mockPrisma.dncEntry.createMany.mock.calls[0][0];
+      expect(call.skipDuplicates).toBe(true);
+      expect(call.data[0]).toMatchObject({
         list_type: "domain",
         domain: "evilcorp.com",
         email: "spammer@evilcorp.com",
+        dedup_key: "domain|spammer@evilcorp.com|evilcorp.com",
       });
+    });
+
+    it("scopes the existing-entries dedup query to the candidate values", async () => {
+      mockPrisma.client.findUnique.mockResolvedValue({ id: "cl1", handle: "acme", name: "Acme" });
+      mockPrisma.dncEntry.findMany.mockResolvedValue([]);
+      mockPrisma.dncEntry.createMany.mockResolvedValue({ count: 1 });
+
+      await request(app)
+        .post("/dnc")
+        .set("Authorization", `Bearer ${API_KEY}`)
+        .send({ handle: "acme", list_type: "individual", entries: ["a@x.com"] });
+
+      const where = mockPrisma.dncEntry.findMany.mock.calls[0][0].where;
+      expect(where.client_id).toBe("cl1");
+      expect(where.OR).toContainEqual({ email: { in: ["a@x.com"] } });
     });
 
     it("skips duplicates already present", async () => {

@@ -20,6 +20,14 @@ interface PreparedEntry {
     domain: string | null;
 }
 
+/**
+ * Stable fingerprint for an entry, used both as the in-app dedup key and as the
+ * persisted `dedup_key` backing the (client_id, dedup_key) unique constraint.
+ */
+function keyOf(e: { list_type: string; email: string | null; domain: string | null }): string {
+    return `${e.list_type}|${e.email ?? ''}|${e.domain ?? ''}`;
+}
+
 export const dncService = {
     /**
      * Turns a raw input value into a normalized entry for the given list type.
@@ -76,40 +84,55 @@ export const dncService = {
         // Dedup within the incoming batch
         const seen = new Set<string>();
         const deduped = prepared.filter(e => {
-            const key = `${e.list_type}|${e.email ?? ''}|${e.domain ?? ''}`;
+            const key = keyOf(e);
             if (seen.has(key)) return false;
             seen.add(key);
             return true;
         });
 
-        // Dedup against existing rows
-        const existing = await prisma.dncEntry.findMany({
-            where: { client_id: clientId },
-            select: { list_type: true, email: true, domain: true }
-        });
-        const existingKeys = new Set(
-            existing.map(e => `${e.list_type}|${e.email ?? ''}|${e.domain ?? ''}`)
-        );
+        // Dedup against existing rows. Scope the lookup to just the candidate
+        // emails/domains instead of loading the client's entire list.
+        const candidateEmails = deduped.map(e => e.email).filter((v): v is string => !!v);
+        const candidateDomains = deduped.map(e => e.domain).filter((v): v is string => !!v);
 
-        const toInsert = deduped.filter(e => {
-            const key = `${e.list_type}|${e.email ?? ''}|${e.domain ?? ''}`;
-            return !existingKeys.has(key);
-        });
+        const existingKeys = new Set<string>();
+        if (candidateEmails.length > 0 || candidateDomains.length > 0) {
+            const existing = await prisma.dncEntry.findMany({
+                where: {
+                    client_id: clientId,
+                    OR: [
+                        ...(candidateEmails.length ? [{ email: { in: candidateEmails } }] : []),
+                        ...(candidateDomains.length ? [{ domain: { in: candidateDomains } }] : []),
+                    ],
+                },
+                select: { list_type: true, email: true, domain: true }
+            });
+            for (const e of existing) existingKeys.add(keyOf(e));
+        }
 
+        const toInsert = deduped.filter(e => !existingKeys.has(keyOf(e)));
+
+        let added = 0;
         if (toInsert.length > 0) {
-            await prisma.dncEntry.createMany({
+            // `skipDuplicates` relies on the (client_id, dedup_key) unique
+            // constraint, so concurrent uploads can't create duplicate rows even
+            // when both pass the read-time dedup above. `count` is authoritative.
+            const result = await prisma.dncEntry.createMany({
                 data: toInsert.map(e => ({
                     client_id: clientId,
                     list_type: e.list_type,
                     email: e.email,
                     domain: e.domain,
-                }))
+                    dedup_key: keyOf(e),
+                })),
+                skipDuplicates: true,
             });
+            added = result.count;
         }
 
         return {
-            added: toInsert.length,
-            skipped_duplicates: prepared.length - toInsert.length,
+            added,
+            skipped_duplicates: prepared.length - added,
             invalid,
             entries: toInsert,
         };

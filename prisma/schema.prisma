@@ -61,8 +61,13 @@ model DncEntry {
   list_type  String // 'individual' | 'domain'
   email      String? // original email submitted (lowercased), if any
   domain     String? // blocked domain (for domain-type entries)
+  // Stable per-entry fingerprint ("list_type|email|domain"). Nullable email/
+  // domain make a composite unique constraint unreliable on Postgres (NULLs
+  // are distinct), so this non-null key backs the dedup guarantee instead.
+  dedup_key  String
   created_at DateTime @default(now()) @db.Timestamptz(6)
 
+  @@unique([client_id, dedup_key])
   @@index([client_id])
   @@index([email])
   @@index([domain])

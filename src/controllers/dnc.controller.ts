@@ -1,40 +1,9 @@
 import { Request, Response } from 'express';
-import { slugifyHandle } from '../services/normalization';
-import { clientService } from '../services/client.service';
 import { dncService } from '../services/dnc.service';
 import { DncListType } from '../types';
+import { resolveClientOr404 } from './client-resolver';
 
 const VALID_LIST_TYPES: DncListType[] = ['individual', 'domain'];
-
-/**
- * Resolve a client by handle, writing a 400/404 response when missing.
- * Returns the client id on success, or null when a response was already sent.
- */
-async function resolveClientOr404(
-    res: Response,
-    rawHandle: unknown
-): Promise<{ id: string; handle: string } | null> {
-    if (!rawHandle || typeof rawHandle !== 'string' || !rawHandle.trim()) {
-        res.status(400).json({ error: 'handle is required.' });
-        return null;
-    }
-
-    const handle = slugifyHandle(rawHandle);
-    const client = await clientService.findByHandle(handle);
-
-    if (!client) {
-        const suggestions = await clientService.suggestHandles(handle);
-        res.status(404).json({
-            error: 'client_not_found',
-            message: `No client found with handle "${handle}".`,
-            handle,
-            suggestions,
-        });
-        return null;
-    }
-
-    return { id: client.id, handle: client.handle };
-}
 
 export const dncController = {
     /**

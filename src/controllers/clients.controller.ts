@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import { slugifyHandle } from '../services/normalization';
 import { clientService } from '../services/client.service';
+import { sendClientNotFound } from './client-resolver';
 
 export const clientsController = {
     /**
@@ -34,11 +35,28 @@ export const clientsController = {
                 return;
             }
 
-            const client = await clientService.createClient({
-                handle,
-                name: name.trim(),
-                data: extraData,
-            });
+            let client;
+            try {
+                client = await clientService.createClient({
+                    handle,
+                    name: name.trim(),
+                    data: extraData,
+                });
+            } catch (error: any) {
+                // Two concurrent creates can both pass the check above; the unique
+                // constraint on `handle` then rejects the loser with P2002.
+                if (error?.code === 'P2002') {
+                    const conflicting = await clientService.findByHandle(handle);
+                    res.status(409).json({
+                        error: 'client_already_exists',
+                        message: `A client with handle "${handle}" already exists.`,
+                        handle,
+                        client: conflicting,
+                    });
+                    return;
+                }
+                throw error;
+            }
 
             res.status(201).json({
                 status: 'ok',
@@ -62,13 +80,7 @@ export const clientsController = {
                 const normalizedHandle = slugifyHandle(handle as string);
                 const client = await clientService.findByHandle(normalizedHandle);
                 if (!client) {
-                    const suggestions = await clientService.suggestHandles(normalizedHandle);
-                    res.status(404).json({
-                        error: 'client_not_found',
-                        message: `No client found with handle "${normalizedHandle}".`,
-                        handle: normalizedHandle,
-                        suggestions,
-                    });
+                    await sendClientNotFound(res, normalizedHandle);
                     return;
                 }
                 res.json({ result: 1, client });
