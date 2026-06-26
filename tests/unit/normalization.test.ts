@@ -4,6 +4,9 @@ import {
   normalizeLinkedIn,
   normalizePhone,
   normalizeDomain,
+  slugifyHandle,
+  extractEmailDomain,
+  levenshtein,
 } from "../../src/services/normalization";
 
 describe("normalizeEmail", () => {
@@ -125,5 +128,76 @@ describe("normalizeDomain", () => {
 
   it("trims whitespace", () => {
     expect(normalizeDomain("  google.com  ")).toBe("google.com");
+  });
+});
+
+describe("slugifyHandle", () => {
+  it("lowercases a single word", () => {
+    expect(slugifyHandle("Acme")).toBe("acme");
+  });
+
+  it("replaces spaces with hyphens", () => {
+    expect(slugifyHandle("Acme Corp")).toBe("acme-corp");
+  });
+
+  it("collapses multiple spaces into a single hyphen", () => {
+    expect(slugifyHandle("Acme   Corp")).toBe("acme-corp");
+  });
+
+  it("strips accents/diacritics", () => {
+    expect(slugifyHandle("Acme Corp México")).toBe("acme-corp-mexico");
+  });
+
+  it("removes punctuation and other symbols", () => {
+    expect(slugifyHandle("Acme, Inc.")).toBe("acme-inc");
+  });
+
+  it("trims leading and trailing separators", () => {
+    expect(slugifyHandle("  -Acme-  ")).toBe("acme");
+  });
+
+  it("handles ampersands and slashes", () => {
+    expect(slugifyHandle("Black & White / Co")).toBe("black-white-co");
+  });
+});
+
+describe("extractEmailDomain", () => {
+  it("extracts the domain part", () => {
+    expect(extractEmailDomain("john@acme.com")).toBe("acme.com");
+  });
+
+  it("lowercases and trims", () => {
+    expect(extractEmailDomain("  John@ACME.COM ")).toBe("acme.com");
+  });
+
+  it("handles plus addressing and subdomains", () => {
+    expect(extractEmailDomain("john+tag@mail.acme.com")).toBe("mail.acme.com");
+  });
+
+  it("returns null when there is no @", () => {
+    expect(extractEmailDomain("not-an-email")).toBeNull();
+  });
+
+  it("returns null when domain has no dot", () => {
+    expect(extractEmailDomain("john@localhost")).toBeNull();
+  });
+});
+
+describe("levenshtein", () => {
+  it("returns 0 for identical strings", () => {
+    expect(levenshtein("acme", "acme")).toBe(0);
+  });
+
+  it("counts single substitutions", () => {
+    expect(levenshtein("acme", "acne")).toBe(1);
+  });
+
+  it("counts insertions/deletions", () => {
+    expect(levenshtein("acme", "acmes")).toBe(1);
+  });
+
+  it("handles empty strings", () => {
+    expect(levenshtein("", "acme")).toBe(4);
+    expect(levenshtein("acme", "")).toBe(4);
   });
 });

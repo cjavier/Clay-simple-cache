@@ -85,6 +85,15 @@ See full documentation at `GET /docs/api` or visit `http://localhost:3000/docs/a
 - **Tech Detector**
   - `POST /detect-tech`: Detect web technologies from a URL.
 
+- **Clients (Do Not Contact)**
+  - `POST /clients`: Create a client. The `handle` (unified client id) is derived from `name` (lowercased, hyphenated, accents stripped).
+  - `GET /clients`: List clients, or fetch one with `?handle=`.
+
+- **Do Not Contact (DNC)**
+  - `POST /dnc`: Upload entries to a client's DNC list (`list_type` = `individual` | `domain`). Emails on a `domain` list are decomposed: the domain is blocked and the original email is stored.
+  - `POST /dnc/check`: Check an email against a client's DNC list. Returns `200` with `do_not_contact: true|false`.
+  - `GET /dnc`: List a client's DNC entries (optional `?list_type=`).
+
 ### Example: Find Email
 
 ```bash

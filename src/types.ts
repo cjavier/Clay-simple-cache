@@ -1,7 +1,17 @@
-import { Profile as PrismaProfile, Company as PrismaCompany, Prisma } from '@prisma/client';
+import { Profile as PrismaProfile, Company as PrismaCompany, Client as PrismaClient, DncEntry as PrismaDncEntry, Prisma } from '@prisma/client';
 
 export type Profile = PrismaProfile;
 export type Company = PrismaCompany;
+export type Client = PrismaClient;
+export type DncEntry = PrismaDncEntry;
+
+export type DncListType = 'individual' | 'domain';
+
+export interface CreateClientParams {
+    handle: string;
+    name: string;
+    data?: Prisma.InputJsonValue;
+}
 
 export interface CreateProfileParams {
     email?: string | null;

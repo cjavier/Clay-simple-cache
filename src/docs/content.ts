@@ -336,6 +336,132 @@ curl -X POST -H "Authorization: Bearer your_secret_key" \\
 
 ---
 
+## Do Not Contact (DNC)
+
+Manage per-client "Do Not Contact" lists. Each client is identified by a **handle**: the client's name, lowercased, with spaces (and other non-alphanumeric characters) replaced by hyphens and accents stripped. e.g. \`"Acme Corp México"\` → \`acme-corp-mexico\`. The handle is the unified client id.
+
+There are two kinds of DNC list:
+- **individual** — specific person emails.
+- **domain** — whole company domains. You may also submit an *email* to a domain list: it is decomposed, the domain is blocked, and the original email is stored for reference.
+
+A check matches if the email itself was listed **or** the email's domain is blocked.
+
+### 8. Create Client
+**POST** \`/clients\`
+
+**Request Body (JSON)**:
+| Field | Type | Required | Description |
+|---|---|---|---|
+| \`name\` | String | Yes | Client name. The \`handle\` is derived from it. |
+| \`...\` | Any | No | Any additional fields are stored in the client's \`data\` object. |
+
+**Response (JSON)** — \`201 Created\`:
+\`\`\`json
+{
+  "status": "ok",
+  "client": {
+    "id": "uuid",
+    "handle": "acme-corp-mexico",
+    "name": "Acme Corp México",
+    "data": {},
+    "created_at": "...",
+    "updated_at": "..."
+  }
+}
+\`\`\`
+
+**Error Responses**:
+| Status | Body | Reason |
+|---|---|---|
+| \`400\` | \`{ "error": "name is required." }\` | Missing/blank \`name\`. |
+| \`409\` | \`{ "error": "client_already_exists", ... }\` | A client with that handle already exists. |
+
+### 9. List / Get Clients
+**GET** \`/clients\`
+
+Lists all clients. Pass \`?handle=<handle>\` to fetch a single client (the handle is normalized before lookup).
+
+**Response — list**: \`{ "result": <count>, "clients": [ ... ] }\`
+**Response — single**: \`{ "result": 1, "client": { ... } }\`
+
+**Error Responses**:
+| Status | Body | Reason |
+|---|---|---|
+| \`404\` | \`{ "error": "client_not_found", "handle": "...", "suggestions": ["..."] }\` | No client with that handle. \`suggestions\` lists similar handles. |
+
+### 10. Upload to a DNC List
+**POST** \`/dnc\`
+
+**Request Body (JSON)**:
+| Field | Type | Required | Description |
+|---|---|---|---|
+| \`handle\` | String | Yes | Client handle. |
+| \`list_type\` | String | Yes | \`individual\` or \`domain\`. |
+| \`entries\` | String[] | Yes* | Values to add (emails for \`individual\`; emails and/or domains for \`domain\`). |
+| \`entry\` / \`email\` / \`domain\` | String | Yes* | Convenience single-value alternatives to \`entries\`. |
+
+*At least one value via \`entries\` or one of \`entry\`/\`email\`/\`domain\` is required.* Invalid values are skipped and reported; duplicates are skipped.
+
+**Response (JSON)** — \`200\`:
+\`\`\`json
+{
+  "status": "ok",
+  "handle": "acme",
+  "list_type": "domain",
+  "added": 1,
+  "skipped_duplicates": 0,
+  "invalid": [],
+  "entries": [
+    { "list_type": "domain", "email": "spammer@evilcorp.com", "domain": "evilcorp.com" }
+  ]
+}
+\`\`\`
+
+**Error Responses**:
+| Status | Body | Reason |
+|---|---|---|
+| \`400\` | \`{ "error": "list_type is required and must be one of: individual, domain." }\` | Missing/invalid \`list_type\`. |
+| \`400\` | \`{ "error": "At least one entry is required..." }\` | No entries supplied. |
+| \`404\` | \`{ "error": "client_not_found", ... }\` | Unknown client handle. |
+
+### 11. Check the DNC List
+**POST** \`/dnc/check\`
+
+Check whether an email should not be contacted for a client.
+
+**Request Body (JSON)**:
+| Field | Type | Required | Description |
+|---|---|---|---|
+| \`handle\` | String | Yes | Client handle. |
+| \`email\` | String | Yes | Email to check. |
+
+**Response (JSON)** — always \`200\` when the client exists:
+\`\`\`json
+{
+  "handle": "acme",
+  "email": "anyone@evilcorp.com",
+  "do_not_contact": true,
+  "matched_by": "domain"
+}
+\`\`\`
+\`do_not_contact\` is \`true\` if the email is on the list, \`false\` otherwise. \`matched_by\` is \`"email"\`, \`"domain"\`, or \`null\`.
+
+**Error Responses**:
+| Status | Body | Reason |
+|---|---|---|
+| \`400\` | \`{ "error": "email is required." }\` | Missing \`email\`. |
+| \`400\` | \`{ "error": "handle is required." }\` | Missing \`handle\`. |
+| \`404\` | \`{ "error": "client_not_found", "handle": "...", "suggestions": ["..."] }\` | Unknown client handle. |
+
+### 12. List DNC Entries
+**GET** \`/dnc\`
+
+Pass \`?handle=<handle>\` (required) and optionally \`?list_type=individual|domain\`.
+
+**Response**: \`{ "handle": "acme", "result": <count>, "entries": [ ... ] }\`
+
+---
+
 ### Pending (Not Yet Implemented)
 - **POST /find/batch** — Batch email finding (accepts array of contacts, processes in background).
 - **POST /verify/batch** — Batch email verification.
