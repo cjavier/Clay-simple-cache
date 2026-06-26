@@ -3,6 +3,7 @@ export const apiDocumentation = `# Identity Cache & Enrichment API
 ## Overview
 This API allows storing, retrieving, and resolving identity profiles (People) and companies.
 It uses a "best-effort" resolution strategy based on multiple identifiers (Email, LinkedIn, Phone, Domain).
+It also manages per-client **Do Not Contact (DNC)** lists: register clients (each with a unified \`handle\`), upload individual emails or whole domains to suppress, and check whether a given email should not be contacted.
 
 ## Base URL
 \`{{BASE_URL}}\`
@@ -346,7 +347,7 @@ There are two kinds of DNC list:
 
 A check matches if the email itself was listed **or** the email's domain is blocked.
 
-### 8. Create Client
+### 9. Create Client
 **POST** \`/clients\`
 
 **Request Body (JSON)**:
@@ -376,7 +377,7 @@ A check matches if the email itself was listed **or** the email's domain is bloc
 | \`400\` | \`{ "error": "name is required." }\` | Missing/blank \`name\`. |
 | \`409\` | \`{ "error": "client_already_exists", ... }\` | A client with that handle already exists. |
 
-### 9. List / Get Clients
+### 10. List / Get Clients
 **GET** \`/clients\`
 
 Lists all clients. Pass \`?handle=<handle>\` to fetch a single client (the handle is normalized before lookup).
@@ -389,7 +390,7 @@ Lists all clients. Pass \`?handle=<handle>\` to fetch a single client (the handl
 |---|---|---|
 | \`404\` | \`{ "error": "client_not_found", "handle": "...", "suggestions": ["..."] }\` | No client with that handle. \`suggestions\` lists similar handles. |
 
-### 10. Upload to a DNC List
+### 11. Upload to a DNC List
 **POST** \`/dnc\`
 
 **Request Body (JSON)**:
@@ -424,7 +425,7 @@ Lists all clients. Pass \`?handle=<handle>\` to fetch a single client (the handl
 | \`400\` | \`{ "error": "At least one entry is required..." }\` | No entries supplied. |
 | \`404\` | \`{ "error": "client_not_found", ... }\` | Unknown client handle. |
 
-### 11. Check the DNC List
+### 12. Check the DNC List
 **POST** \`/dnc/check\`
 
 Check whether an email should not be contacted for a client.
@@ -453,7 +454,7 @@ Check whether an email should not be contacted for a client.
 | \`400\` | \`{ "error": "handle is required." }\` | Missing \`handle\`. |
 | \`404\` | \`{ "error": "client_not_found", "handle": "...", "suggestions": ["..."] }\` | Unknown client handle. |
 
-### 12. List DNC Entries
+### 13. List DNC Entries
 **GET** \`/dnc\`
 
 Pass \`?handle=<handle>\` (required) and optionally \`?list_type=individual|domain\`.
