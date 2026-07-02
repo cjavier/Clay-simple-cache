@@ -1,14 +1,16 @@
-# Identity Cache & Enrichment API
+# Clay Cache API
 
-Service to ingest, normalize, and enrich identity data (Profiles & Companies). It allows upserting records based on normalized keys and merging data into a unified record. Includes an **Email Finder** module for discovering and verifying professional email addresses.
+Identity cache, email finder, tech stack detection, LinkedIn resolution, per-client Do Not Contact (DNC) lists, and DeepSeek-backed AI endpoints (copy generation + a web-research agent) for a GTM outbound agency. Allows upserting People/Company records based on normalized keys and merging enrichment data into a unified record over time.
+
+Full endpoint reference (request/response shapes, error codes, curl examples, and a compact machine-readable summary for AI agents) is served live at `GET /docs/api` — see [Docs](#docs) below.
 
 ## Features
 - **Profiles**:
   - Normalization: Email, LinkedIn (Slug & Full URL), Phone.
-  - Resolution: Email > LinkedIn URL > LinkedIn Slug > Phone.
+  - Resolution priority: Email > LinkedIn URL > LinkedIn Slug > Phone.
 - **Companies**:
   - Normalization: Domain (trim, lowercase, remove www/protocol), LinkedIn.
-  - Resolution: Domain > LinkedIn.
+  - Resolution priority: Domain > LinkedIn.
 - **Email Finder**:
   - Given a name + domain, generates email permutations (15 patterns, LATAM-aware).
   - SERP-based pattern discovery: searches Google for `"@domain.com"` to find real emails and identify the domain's pattern before brute-forcing.
@@ -21,7 +23,15 @@ Service to ingest, normalize, and enrich identity data (Profiles & Companies). I
   - Parallel verification for speed (batches of 5 concurrent API calls).
 - **Tech Detector**:
   - Given a URL, fetches its HTML and detects web technologies (CMS, ecommerce, analytics, tag managers, marketing tools, advertising pixels, payment integrations, CDN, SEO plugins, and privacy tools).
-- **Data Merging**: Merges JSON data safely.
+- **LinkedIn Finder**:
+  - Resolves a company domain to its LinkedIn company page via SERP search.
+- **Clients & Do Not Contact (DNC)**:
+  - Register clients under a readable `handle` (derived from `name`).
+  - Per-client DNC lists (`individual` emails or whole `domain`s); an optional `dnc_client` param on `GET /profiles`, `GET /companies`, `POST /find`, and `POST /verify` gates the lookup behind the client's DNC list in a single call.
+- **AI (DeepSeek)**:
+  - `POST /copy` — single-shot prompt → outbound copy generation.
+  - `POST /explore` — a tool-using research agent (Google search + page fetch, SSRF-guarded) that answers open-ended questions with sourced reasoning steps.
+- **Data Merging**: Merges JSON data safely, never destructively overwrites.
 - **ORM**: Builds on **Prisma** + **Supabase** (PostgreSQL).
 
 ## Setup
@@ -36,15 +46,20 @@ Service to ingest, normalize, and enrich identity data (Profiles & Companies). I
    ```bash
    cp .env.example .env
    ```
-   
-   Required variables:
-   - `PORT`: Server port (default 3000)
-   - `API_KEY`: Bearer token for authentication
-   - `DATABASE_URL`: Connection Pool URL (Transaction Mode, Port 6543)
-   - `DIRECT_URL`: Direct Connection URL (Session Mode, Port 5432)
-   - `SERPER_API_KEY`: SERP pattern discovery (google.serper.dev)
-   - `EMAILLISTVERIFY_API_KEY`: Tier 1 verification provider
-   - `DEBOUNCE_API_KEY`: Tier 2 verification provider
+
+   | Variable | Required | Description |
+   |---|---|---|
+   | `PORT` | No (default `3000`) | HTTP port the server listens on. |
+   | `API_KEY` | **Yes** | Bearer token required on every endpoint except `GET /health` and `GET /docs/api`. |
+   | `DATABASE_URL` | **Yes** | Connection Pool URL (Transaction Mode, port `6543`). |
+   | `DIRECT_URL` | **Yes** | Direct Connection URL (Session Mode, port `5432`) — used for migrations. |
+   | `EMAILLISTVERIFY_API_KEY` | **Yes** (for Email Finder) | Tier 1 email verification provider. |
+   | `DEBOUNCE_API_KEY` | **Yes** (for Email Finder) | Tier 2 email verification provider. |
+   | `SERPER_API_KEY` | **Yes** (for Email Finder, LinkedIn Finder, Explore agent) | google.serper.dev — SERP pattern discovery, domain→LinkedIn resolution, and the `serp_search` tool. |
+   | `DEEPSEEK_API_KEY` | **Yes** (for `/copy`, `/explore`) | DeepSeek chat completions API. Missing key returns `503` from those two endpoints only; the rest of the API works without it. |
+   | `ALLOWED_ORIGINS` | No | Comma-separated list of allowed CORS origins. Omitted/empty = CORS open (current default behavior). |
+   | `RATE_LIMIT_PER_MIN` | No (default `300`) | Global per-IP rate limit (requests/minute), all routes. |
+   | `COSTLY_RATE_LIMIT_PER_MIN` | No (default `30`) | Additional per-IP rate limit (requests/minute) stacked on `/find`, `/verify`, `/detect-tech`, `/copy`, `/explore`, `/find-linkedin`. |
 
 3. **Database Setup**:
    Push the schema to your database:
@@ -59,31 +74,49 @@ Service to ingest, normalize, and enrich identity data (Profiles & Companies). I
 npm run dev
 ```
 
-**Production Build**:
+**Production Build & Start**:
 ```bash
 npm run build
 npm start
 ```
+`npm start` runs `prisma migrate deploy` (applying versioned migrations from `prisma/migrations/`) before starting the compiled server — it no longer runs `prisma db push` in production, since `db push` can silently drop data on a live database. Migrations are the source of truth for schema changes; use `npm run prisma:push` only against your local/dev database.
 
-**API Endpoints**:
+**npm scripts**:
+| Script | Purpose |
+|---|---|
+| `npm run dev` | `prisma generate` + `prisma db push` + `nodemon src/index.ts` (local dev, schema kept in sync automatically). |
+| `npm run build` | `tsc` — compiles to `dist/`. |
+| `npm start` | `prisma generate` + `prisma migrate deploy` + `node dist/index.js` (production; requires committed migrations). |
+| `npm run prisma:generate` | Regenerate the Prisma client. |
+| `npm run prisma:push` | Push the schema directly to the database (dev only — bypasses migrations). |
+| `npm run prisma:studio` | Open Prisma Studio. |
+| `npm test` | `vitest run` — run the test suite once. |
+| `npm run test:watch` | `vitest` — run tests in watch mode. |
 
-See full documentation at `GET /docs/api` or visit `http://localhost:3000/docs/api` locally.
+## Docs
 
-- **Profiles**
-  - `POST /profiles`: Upsert/Enrich a profile.
-  - `GET /profiles`: Query by `email`, `linkedin`, or `phone`.
+See the full, always-current API reference at `GET /docs/api` (e.g. `http://localhost:3000/docs/api` locally). It documents every endpoint below with request/response shapes, error codes, curl examples, rate limits, and a compact "for AI agents" summary meant to be pasted directly into an agent prompt.
 
-- **Companies**
-  - `POST /companies`: Upsert/Enrich a company.
-  - `GET /companies`: Query by `domain` or `linkedin`.
+**API Endpoints** (summary — see `/docs/api` for full detail):
+
+- **Cache — Profiles**
+  - `POST /profiles`: Upsert/enrich a profile by `email`, `linkedin_url`, or `phone`.
+  - `GET /profiles`: Query by `email`, `linkedin`, or `phone`. Optional `dnc_client=<handle>` gates the response behind that client's DNC list.
+
+- **Cache — Companies**
+  - `POST /companies`: Upsert/enrich a company by `domain` or `linkedin_url`.
+  - `GET /companies`: Query by `domain` or `linkedin`. Optional `dnc_client=<handle>`.
 
 - **Email Finder**
-  - `POST /find`: Find email by name + domain.
-  - `POST /verify`: Verify an existing email address.
+  - `POST /find`: Find email by name + domain. Optional `dnc_client=<handle>`.
+  - `POST /verify`: Verify an existing email address. Optional `dnc_client=<handle>`.
   - `GET /stats`: Aggregate metrics for the email finder.
 
 - **Tech Detector**
   - `POST /detect-tech`: Detect web technologies from a URL.
+
+- **LinkedIn Finder**
+  - `POST /find-linkedin`: Resolve a domain (or URL) to its LinkedIn company page.
 
 - **Clients (Do Not Contact)**
   - `POST /clients`: Create a client. The `handle` (unified client id) is derived from `name` (lowercased, hyphenated, accents stripped).
@@ -93,6 +126,14 @@ See full documentation at `GET /docs/api` or visit `http://localhost:3000/docs/a
   - `POST /dnc`: Upload entries to a client's DNC list (`list_type` = `individual` | `domain`). Emails on a `domain` list are decomposed: the domain is blocked and the original email is stored.
   - `POST /dnc/check`: Check an email against a client's DNC list. Returns `200` with `do_not_contact: true|false`.
   - `GET /dnc`: List a client's DNC entries (optional `?list_type=`).
+
+- **AI (DeepSeek)**
+  - `POST /copy`: Generate outbound copy from a prompt. Returns `503` if `DEEPSEEK_API_KEY` is unset, `502` on upstream failure.
+  - `POST /explore`: Run a tool-using research agent (`serp_search` + `fetch_page`, up to `max_steps` tool calls, default 8, hard cap 15). Returns the final message plus a step-by-step trace.
+
+- **Misc**
+  - `GET /health`: Liveness check (no auth), returns `OK`.
+  - `GET /docs/api`: This documentation (no auth).
 
 ### Example: Find Email
 
@@ -158,6 +199,15 @@ curl -X POST http://localhost:3000/detect-tech \
 | `privacy` | Consent tools (OneTrust, CookieBot) |
 | `resumen` | Human-readable summary of detected technologies |
 
+### Example: Check Do Not Contact
+
+```bash
+curl -X POST http://localhost:3000/dnc/check \
+  -H "Authorization: Bearer your_api_key" \
+  -H "Content-Type: application/json" \
+  -d '{"handle": "acme", "email": "juan@empresa.com"}'
+```
+
 ## Email Finder — Cost per Lookup
 
 Each lookup runs through a pipeline with up to 3 paid services. Actual cost depends on how quickly a valid email is found.
@@ -181,13 +231,23 @@ Each lookup runs through a pipeline with up to 3 paid services. Actual cost depe
 
 **Typical cost: ~$0.003 per email** (SERP patterns prioritize the right permutation early).
 
-## Pending / Roadmap
+## Roadmap
+
+Not yet implemented in this API:
 - `POST /find/batch` — Batch email finding (array of contacts, background processing).
 - `POST /verify/batch` — Batch email verification.
 - Tier 3 verification provider (NeverBounce).
 
-## Testing Normalization
-Run the verification scripts:
+See [`ROADMAP.md`](./ROADMAP.md) for the full phased plan: production hardening, a `/personalize` copy engine with per-client voice profiles, Instantly campaign integration, async enrichment jobs, multi-tenant API keys/usage metering, and an MCP server surface for agents.
+
+## Testing
+
+Run the test suite:
+```bash
+npm test
+```
+
+Standalone normalization verification scripts:
 ```bash
 npx ts-node src/verify_normalization.ts # Profiles
 npx ts-node src/verify_companies.ts     # Companies

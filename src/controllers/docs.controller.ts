@@ -1,11 +1,21 @@
 import { Request, Response } from 'express';
 import { apiDocumentation } from '../docs/content';
 
+// Only allow characters that can legitimately appear in a Host header
+// (hostname/IPv6 literal + optional port). Anything else is rejected to
+// prevent the client-controlled Host header from being reflected into the
+// HTML response (reflected XSS via Host injection).
+const SAFE_HOST_REGEX = /^[a-zA-Z0-9.\-:\[\]]+$/;
+
 export const docsController = {
   async get(req: Request, res: Response): Promise<void> {
-    const baseUrl = req.protocol + '://' + req.get('host');
+    const rawHost = req.get('host') || '';
+    const safeHost = SAFE_HOST_REGEX.test(rawHost) ? rawHost : 'localhost:3000';
+    const baseUrl = req.protocol + '://' + safeHost;
     const safeContent = apiDocumentation
-      .replace('{{BASE_URL}}', baseUrl)
+      // Global replace: the docs use {{BASE_URL}} many times (once per curl
+      // example), and a plain-string .replace() only swaps the first match.
+      .replace(/\{\{BASE_URL\}\}/g, baseUrl)
       .replace(/`/g, '\\`')
       .replace(/\$\{/g, '\\${');
 

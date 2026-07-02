@@ -1,195 +1,263 @@
-export const apiDocumentation = `# Identity Cache & Enrichment API
+export const apiDocumentation = `# Clay Cache API
 
-## Overview
-This API allows storing, retrieving, and resolving identity profiles (People) and companies.
-It uses a "best-effort" resolution strategy based on multiple identifiers (Email, LinkedIn, Phone, Domain).
-It also manages per-client **Do Not Contact (DNC)** lists: register clients (each with a unified \`handle\`), upload individual emails or whole domains to suppress, and check whether a given email should not be contacted.
+**Identity cache · Email finder · Tech detection · LinkedIn resolver · Do Not Contact lists · GTM AI**
 
-## Base URL
-\`{{BASE_URL}}\`
+<a id="overview"></a>
+## 1. Overview
 
-## Authentication
-All endpoints (except \`/health\` and \`/docs/api\`) require an API Key passed via the \`Authorization\` header using the **Bearer** scheme.
+This API is the internal data & automation backbone for a GTM (go-to-market) outbound agency. It combines:
+
+- An **identity cache** for People (\`profiles\`) and **Companies**, resolved via email, LinkedIn, phone, or domain, with best-effort merging across enrichment sources.
+- An **Email Finder** that generates and verifies likely email addresses for a person at a domain (pattern permutation + SERP discovery + multi-tier verification), plus a standalone email **Verify** endpoint.
+- A **Tech Detector** that fingerprints a website's stack (CMS, ecommerce, analytics, ads, CRM, payments, etc.).
+- A **LinkedIn Finder** that resolves a company domain to its LinkedIn company page.
+- Per-client **Do Not Contact (DNC)** lists (individual emails or whole domains), with an optional \`dnc_client\` gate on the read/lookup endpoints.
+- Two **AI endpoints** backed by DeepSeek: \`/copy\` (single-shot copywriting) and \`/explore\` (a tool-using research agent with web search + page fetch).
+
+<a id="authentication"></a>
+## 2. Authentication
+
+Every endpoint **except** \`GET /health\` and \`GET /docs/api\` requires a Bearer API key.
 
 **Header**: \`Authorization\`
-**Value**: \`Bearer <your_api_key>\`
+**Value**: \`Bearer <API_KEY>\`
 
-Example:
 \`\`\`bash
 curl -H "Authorization: Bearer your_secret_key" {{BASE_URL}}/profiles?email=test@example.com
 \`\`\`
 
-**Error Responses**:
 | Status | Body | Reason |
 |---|---|---|
-| \`401\` | \`{ "error": "Unauthorized: Missing or malformed Authorization header" }\` | Header is missing or does not start with \`Bearer \`. |
-| \`401\` | \`{ "error": "Unauthorized: Invalid API Key" }\` | The token does not match the server's API key. |
+| \`401\` | \`{ "error": "Unauthorized: Missing or malformed Authorization header" }\` | Header missing or doesn't start with \`Bearer \`. |
+| \`401\` | \`{ "error": "Unauthorized: Invalid API Key" }\` | Token doesn't match the server's \`API_KEY\`. |
+| \`500\` | \`{ "error": "Internal Server Error: Security configuration missing" }\` | Server has no \`API_KEY\` configured (deployment issue, not a client error). |
 
 ---
 
-## Endpoints
+<a id="toc"></a>
+## 3. Table of Contents
 
-### 1. Upsert Profile
-**POST** \`/profiles\`
+- [1. Overview](#overview)
+- [2. Authentication](#authentication)
+- [3. Table of Contents](#toc)
+- [4. Endpoints at a Glance](#glance)
+- [5. Quick Start](#quick-start)
+- [6. Cache — Profiles & Companies](#cache)
+  - [\`POST /profiles\`](#profiles-post) · [\`GET /profiles\`](#profiles-get)
+  - [\`POST /companies\`](#companies-post) · [\`GET /companies\`](#companies-get)
+- [7. Email Finder](#email-finder)
+  - [\`POST /find\`](#find-post) · [\`POST /verify\`](#verify-post) · [\`GET /stats\`](#stats-get)
+- [8. Tech Detector](#tech-detector)
+  - [\`POST /detect-tech\`](#detect-tech-post)
+- [9. LinkedIn Finder](#linkedin-finder)
+  - [\`POST /find-linkedin\`](#find-linkedin-post)
+- [10. Clients & Do Not Contact (DNC)](#clients-dnc)
+  - [\`POST /clients\`](#clients-post) · [\`GET /clients\`](#clients-get)
+  - [\`POST /dnc\`](#dnc-post) · [\`POST /dnc/check\`](#dnc-check-post) · [\`GET /dnc\`](#dnc-get)
+  - [\`dnc_client\` semantics](#dnc-client-semantics)
+- [11. AI — Copy & Explore (DeepSeek)](#ai)
+  - [\`POST /copy\`](#copy-post) · [\`POST /explore\`](#explore-post)
+- [12. Errors & Limits](#errors-and-limits)
+- [13. For AI Agents (llms.txt style)](#for-ai-agents)
+- [14. Pending / Roadmap](#pending)
 
-Create or update a profile record. The API will try to find an existing profile by any of the provided identifiers. If found, it merges the new data into the existing record. Otherwise, it creates a new profile.
+---
 
-**Request Body (JSON)**:
-| Field | Type | Required | Description |
+<a id="glance"></a>
+## 4. Endpoints at a Glance
+
+| Method | Path | Description | Section |
 |---|---|---|---|
-| \`email\` | String | No* | Person's email. Will be lowercased. |
-| \`linkedin_url\` | String | No* | LinkedIn profile URL. Slug will be extracted and full URL stored. |
-| \`linkedin_profile\` | String | No* | Alias for \`linkedin_url\`. |
-| \`phone\` | String | No* | Phone number. Will be normalized to E.164. |
-| \`...\` | Any | No | Any additional fields will be stored in the \`data\` object. |
+| \`POST\` | \`/profiles\` | Upsert/enrich a person profile by email, LinkedIn, or phone. | [Cache](#profiles-post) |
+| \`GET\` | \`/profiles\` | Look up a profile; optional \`dnc_client\` gate. | [Cache](#profiles-get) |
+| \`POST\` | \`/companies\` | Upsert/enrich a company by domain or LinkedIn. | [Cache](#companies-post) |
+| \`GET\` | \`/companies\` | Look up a company; optional \`dnc_client\` gate. | [Cache](#companies-get) |
+| \`POST\` | \`/find\` | Find the most likely email for a person at a domain. | [Email Finder](#find-post) |
+| \`POST\` | \`/verify\` | Verify an existing email address. | [Email Finder](#verify-post) |
+| \`GET\` | \`/stats\` | Aggregate email finder metrics. | [Email Finder](#stats-get) |
+| \`POST\` | \`/detect-tech\` | Detect web technologies used by a URL. | [Tech Detector](#detect-tech-post) |
+| \`POST\` | \`/find-linkedin\` | Resolve a domain to its LinkedIn company URL. | [LinkedIn Finder](#find-linkedin-post) |
+| \`POST\` | \`/clients\` | Create a client (handle derived from \`name\`). | [Clients & DNC](#clients-post) |
+| \`GET\` | \`/clients\` | List clients, or fetch one by \`?handle=\`. | [Clients & DNC](#clients-get) |
+| \`POST\` | \`/dnc\` | Upload entries to a client's DNC list. | [Clients & DNC](#dnc-post) |
+| \`POST\` | \`/dnc/check\` | Check if an email is on a client's DNC list. | [Clients & DNC](#dnc-check-post) |
+| \`GET\` | \`/dnc\` | List a client's DNC entries. | [Clients & DNC](#dnc-get) |
+| \`POST\` | \`/copy\` | Generate copy from a prompt (DeepSeek). | [AI](#copy-post) |
+| \`POST\` | \`/explore\` | Run a research agent (SERP + page fetch, DeepSeek). | [AI](#explore-post) |
+| \`GET\` | \`/health\` | Liveness check (no auth). Returns \`OK\`. | — |
+| \`GET\` | \`/docs/api\` | This page (no auth). | — |
+| \`GET\` | \`/\` | Redirects to \`/docs/api\`. | — |
 
-*At least one of \`email\`, \`linkedin_url\`, or \`phone\` is required.*
+---
 
-**Response (JSON)**:
+<a id="quick-start"></a>
+## 5. Quick Start
+
+\`\`\`bash
+# 1. Look up a cached profile by email
+curl -H "Authorization: Bearer your_secret_key" \\
+  "{{BASE_URL}}/profiles?email=juan@empresa.com"
+
+# 2. Find the most likely email for a person at a domain
+curl -X POST "{{BASE_URL}}/find" \\
+  -H "Authorization: Bearer your_secret_key" \\
+  -H "Content-Type: application/json" \\
+  -d '{"first_name": "Juan", "last_name": "Garcia", "domain": "empresa.com"}'
+
+# 3. Check a client's Do Not Contact list before reaching out
+curl -X POST "{{BASE_URL}}/dnc/check" \\
+  -H "Authorization: Bearer your_secret_key" \\
+  -H "Content-Type: application/json" \\
+  -d '{"handle": "acme", "email": "juan@empresa.com"}'
+\`\`\`
+
+---
+
+<a id="cache"></a>
+## 6. Cache — Profiles & Companies
+
+Best-effort identity resolution: upsert with any subset of known identifiers, and later look records up by whichever identifier you have. New data is **merged** into existing records rather than overwritten.
+
+<a id="profiles-post"></a>
+### \`POST /profiles\` — Upsert Profile
+
+Create or update a profile. Looks for an existing record by any provided identifier (in priority order **email > linkedin_url > linkedin_slug > phone**); if found, merges new fields into it, otherwise creates a new profile.
+
+**Body (JSON)**:
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| \`email\` | string | No* | — | Lowercased on save. |
+| \`linkedin_url\` | string | No* | — | Full LinkedIn profile URL; slug is extracted and stored alongside the full URL. |
+| \`linkedin_profile\` | string | No* | — | Alias for \`linkedin_url\`. |
+| \`phone\` | string | No* | — | Normalized to E.164 (via \`libphonenumber-js\`). |
+| ...anything else | any | No | — | Stored verbatim in the \`data\` object and merged with existing data on future calls. |
+
+\\* At least one of \`email\`, \`linkedin_url\`/\`linkedin_profile\`, or \`phone\` is required.
+
+**Response — \`200\`**:
 \`\`\`json
 {
   "status": "ok",
-  "resolved_by": "email | linkedin_slug | linkedin_url | phone_e164 | new",
-  "profile_id": "uuid-string",
+  "resolved_by": "email",
+  "profile_id": "1f2e-uuid",
   "saved_data": {
-    "id": "uuid-string",
-    "email": "normalized-email | null",
-    "linkedin_slug": "slug | null",
-    "linkedin_url": "full-url | null",
-    "phone_e164": "+E.164 | null",
-    "data": { "...additional fields..." }
+    "id": "1f2e-uuid",
+    "email": "juan@empresa.com",
+    "linkedin_slug": "juan-garcia",
+    "linkedin_url": "https://www.linkedin.com/in/juan-garcia",
+    "phone_e164": "+525512345678",
+    "data": { "title": "VP Sales", "linkedin_url": "...", "phone_national": "..." }
   }
 }
 \`\`\`
+\`resolved_by\` is one of \`email\` \\| \`linkedin_url\` \\| \`linkedin_slug\` \\| \`phone_e164\` \\| \`new\` (freshly created) \\| \`race\` (a concurrent request won the create and this call merged into it).
 
----
+**Errors**: \`400\` \`{ "error": "At least one identity key (email, linkedin_url, phone) is required." }\`; \`500\` on unexpected failure.
 
-### 2. Get Profile
-**GET** \`/profiles\`
+\`\`\`bash
+curl -X POST {{BASE_URL}}/profiles \\
+  -H "Authorization: Bearer your_secret_key" -H "Content-Type: application/json" \\
+  -d '{"email": "juan@empresa.com", "linkedin_url": "https://linkedin.com/in/juan-garcia", "title": "VP Sales"}'
+\`\`\`
 
-Retrieve a profile by identifier.
+<a id="profiles-get"></a>
+### \`GET /profiles\` — Get Profile
 
-**Query Parameters**:
-| Param | Description |
-|---|---|
-| \`email\` | Search by email. |
-| \`linkedin\` | Search by LinkedIn URL or slug. |
-| \`phone\` | Search by phone (E.164 or loose format). |
+**Query params** (any one): \`email\`, \`linkedin\` (URL or slug, also accepts \`linkedin_url\`), \`phone\`. Optional: \`dnc_client\` — see [\`dnc_client\` semantics](#dnc-client-semantics).
 
-**Response — Found (JSON)**:
+**Response — Found (\`200\`)**: fields from the stored \`data\` object are spread at the root, then overwritten by the canonical columns:
 \`\`\`json
 {
-  "id": "uuid-string",
-  "email": "string | null",
-  "linkedin_slug": "string | null",
-  "phone": "string (E.164) | null",
-  "updated_at": "ISO-8601 Date",
-  "...": "Dynamic fields from 'data' object are spread here at the root level"
+  "result": 1,
+  "title": "VP Sales",
+  "id": "1f2e-uuid",
+  "email": "juan@empresa.com",
+  "linkedin_slug": "juan-garcia",
+  "phone": "+525512345678",
+  "updated_at": "2026-07-01T12:00:00.000Z"
 }
 \`\`\`
 
-**Response — Not Found (200, JSON)**:
+**Response — Not found (\`200\`)**:
 \`\`\`json
 {
   "result": null,
   "message": "No records found",
-  "search_criteria": {
-    "email": "normalized value or undefined",
-    "linkedin_url": "value or undefined",
-    "linkedin_slug": "value or undefined",
-    "phone_e164": "value or undefined"
-  }
+  "search_criteria": { "email": "juan@empresa.com", "linkedin_url": null, "linkedin_slug": null, "phone_e164": null }
 }
 \`\`\`
 
----
+**With \`?dnc_client=acme\`** — either the client isn't found (\`404\`), the contact is blocked (\`200\`, body is *only* \`{ "do_not_contact": true, "matched_by": "email" }\`), or the normal response above with an added \`"do_not_contact": false\`.
 
-### 3. Upsert Company
-**POST** \`/companies\`
+\`\`\`bash
+curl -H "Authorization: Bearer your_secret_key" \\
+  "{{BASE_URL}}/profiles?email=juan@empresa.com&dnc_client=acme"
+\`\`\`
 
-Create or update a company record. The API will try to find an existing company by domain or LinkedIn slug. If found, it merges the new data. Otherwise, it creates a new company.
+<a id="companies-post"></a>
+### \`POST /companies\` — Upsert Company
 
-**Request Body (JSON)**:
+Same merge semantics as profiles, resolved by **domain > linkedin_slug**.
+
+**Body (JSON)**:
 | Field | Type | Required | Description |
 |---|---|---|---|
-| \`domain\` | String | No* | Company website domain (e.g. "google.com"). |
-| \`linkedin_url\` | String | No* | Company LinkedIn URL. |
-| \`...\` | Any | No | Any additional fields will be stored in the \`data\` object. |
+| \`domain\` | string | No* | Normalized: trimmed, lowercased, \`www.\`/protocol stripped. |
+| \`linkedin_url\` | string | No* | Company LinkedIn URL; slug extracted. |
+| ...anything else | any | No | Stored/merged into \`data\`. |
 
-*At least one of \`domain\` or \`linkedin_url\` is required.*
+\\* At least one of \`domain\` or \`linkedin_url\` is required.
 
-**Response (JSON)**:
+**Response — \`200\`**:
 \`\`\`json
 {
   "status": "ok",
-  "resolved_by": "domain | linkedin_slug | new",
-  "company_id": "uuid-string",
+  "resolved_by": "domain",
+  "company_id": "9a1c-uuid",
   "saved_data": {
-    "id": "uuid-string",
-    "domain": "normalized-domain | null",
-    "linkedin_slug": "slug | null",
-    "data": { "...additional fields..." }
+    "id": "9a1c-uuid",
+    "domain": "empresa.com",
+    "linkedin_slug": "empresa-inc",
+    "data": { "industry": "SaaS", "linkedin_url": "..." }
   }
 }
 \`\`\`
+\`resolved_by\`: \`domain\` \\| \`linkedin_slug\` \\| \`new\` \\| \`race\`.
+
+**Errors**: \`400\` \`{ "error": "At least one identifier (domain, linkedin_url) is required." }\`.
+
+<a id="companies-get"></a>
+### \`GET /companies\` — Get Company
+
+**Query params**: \`domain\`, \`linkedin\` (or \`linkedin_url\`). Optional \`dnc_client\` — same [semantics](#dnc-client-semantics) as \`GET /profiles\`, but checked against the company's **domain** (\`matched_by\` will be \`"domain"\` when blocked).
+
+**Response — Found (\`200\`)**: same spread pattern as profiles (\`data\` fields at root, then \`id\`, \`domain\`, \`linkedin_slug\`, \`updated_at\`).
+
+**Response — Not found (\`200\`)**: \`{ "result": null, "message": "No records found", "search_criteria": { "domain": "...", "linkedin_slug": "..." } }\`.
 
 ---
 
-### 4. Get Company
-**GET** \`/companies\`
+<a id="email-finder"></a>
+## 7. Email Finder
 
-Retrieve a company by identifier.
+Given a name and a domain, generates likely email permutations (15 patterns, LATAM-name-aware), tries to shortcut via SERP pattern discovery, and verifies candidates through a cost-tiered provider cascade (EmailListVerify → Debounce). Results and learned patterns are cached.
 
-**Query Parameters**:
-| Param | Description |
-|---|---|
-| \`domain\` | Search by domain. |
-| \`linkedin\` | Search by LinkedIn URL or slug. |
+<a id="find-post"></a>
+### \`POST /find\` — Find Email
 
-**Response — Found (JSON)**:
-\`\`\`json
-{
-  "id": "uuid-string",
-  "domain": "string | null",
-  "linkedin_slug": "string | null",
-  "updated_at": "ISO-8601 Date",
-  "...": "Dynamic fields from 'data' object are spread here at the root level"
-}
-\`\`\`
+**Body (JSON)**:
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| \`domain\` | string | **Yes** | — | Company domain, e.g. \`"empresa.com"\`. |
+| \`first_name\` | string | No* | — | |
+| \`last_name\` | string | No* | — | |
+| \`full_name\` | string | No* | — | Parsed with LATAM-aware name-splitting logic. |
+| \`max_tier\` | number | No | \`2\` | Max verification tier to use (\`1\` or \`2\`). |
+| \`dnc_client\` | string | No | — | Client handle; see [\`dnc_client\` semantics](#dnc-client-semantics). Checked against the request \`domain\` **before** the search runs, and again against the found \`email\` before responding. |
 
-**Response — Not Found (200, JSON)**:
-\`\`\`json
-{
-  "result": null,
-  "message": "No records found",
-  "search_criteria": {
-    "domain": "normalized value or undefined",
-    "linkedin_slug": "value or undefined"
-  }
-}
-\`\`\`
+\\* At least one of \`first_name\`, \`last_name\`, \`full_name\` is required.
 
----
-
-## Email Finder
-
-### 5. Find Email
-**POST** \`/find\`
-
-Given a person's name and company domain, finds their most likely email address using pattern permutation and multi-tier API verification.
-
-**Request Body (JSON)**:
-| Field | Type | Required | Description |
-|---|---|---|---|
-| \`first_name\` | String | No* | Person's first name. |
-| \`last_name\` | String | No* | Person's last name. |
-| \`full_name\` | String | No* | Full name (parsed with LATAM logic). |
-| \`domain\` | String | **Yes** | Company domain (e.g. "empresa.com"). |
-| \`max_tier\` | Number | No | Max verification tier: 1 or 2 (default: 2). |
-
-*At least one of \`first_name\`, \`last_name\`, or \`full_name\` is required.*
-
-**Response (JSON)**:
+**Response — \`200\`**:
 \`\`\`json
 {
   "success": true,
@@ -201,53 +269,62 @@ Given a person's name and company domain, finds their most likely email address 
   "domain_info": {
     "domain": "empresa.com",
     "has_mx": true,
+    "mx_records": ["aspmx.l.google.com"],
     "provider": "google_workspace",
     "is_catch_all": false,
     "is_disposable": false,
-    "is_free_provider": false
+    "is_free_provider": false,
+    "smtp_verifiable": true
+  },
+  "serp_info": {
+    "used": true,
+    "emails_found": 3,
+    "patterns_detected": [{ "pattern": "first.last", "count": 2, "examples": ["ana.lopez@empresa.com"] }],
+    "direct_match": null
   },
   "permutations_tried": 1,
   "cost_usd": 0.0004,
   "duration_ms": 983
 }
 \`\`\`
+\`status\`: \`valid\` \\| \`invalid\` \\| \`catch_all\` \\| \`unknown\` \\| \`risky\` \\| \`disposable\` \\| \`no_mx\` \\| \`role_account\`.
+\`method\`: \`local_syntax\` \\| \`local_dns\` \\| \`emaillistverify\` \\| \`debounce\` \\| \`bouncer\` \\| \`neverbounce\` \\| \`serp_pattern\`.
 
-**Possible \`status\` values**: \`valid\`, \`invalid\`, \`catch_all\`, \`unknown\`, \`risky\`, \`disposable\`, \`no_mx\`, \`role_account\`.
+If \`dnc_client\` was sent and matched, the response is **only** \`{ "do_not_contact": true, "matched_by": "domain" | "email" }\` — no email/cost data leaks. Otherwise the response above gains \`"do_not_contact": false\`.
 
----
+**Errors**: \`400\` missing \`domain\`; \`400\` missing name fields; \`404\` \`dnc_client\` handle not found; \`500\` unexpected.
 
-### 6. Verify Email
-**POST** \`/verify\`
+<a id="verify-post"></a>
+### \`POST /verify\` — Verify Email
 
-Verify an existing email address through the API cascade.
+**Body (JSON)**:
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| \`email\` | string | **Yes** | — | Email to verify. |
+| \`max_tier\` | number | No | \`2\` | Max verification tier (\`1\` or \`2\`). |
+| \`dnc_client\` | string | No | — | Checked against \`email\` before verifying; see [semantics](#dnc-client-semantics). |
 
-**Request Body (JSON)**:
-| Field | Type | Required | Description |
-|---|---|---|---|
-| \`email\` | String | **Yes** | The email to verify. |
-| \`max_tier\` | Number | No | Max verification tier: 1 or 2 (default: 2). |
-
-**Response (JSON)**:
+**Response — \`200\`**:
 \`\`\`json
 {
   "email": "juan@empresa.com",
   "status": "valid",
   "confidence": 0.95,
   "method": "emaillistverify",
-  "domain_info": { ... },
+  "domain_info": { "domain": "empresa.com", "has_mx": true, "provider": "google_workspace", "is_catch_all": false, "is_disposable": false, "is_free_provider": false },
   "cost_usd": 0.0004,
   "duration_ms": 450
 }
 \`\`\`
+Blocked case: only \`{ "do_not_contact": true, "matched_by": "..." }\`. Otherwise adds \`"do_not_contact": false\`.
 
----
+**Errors**: \`400\` missing \`email\`; \`404\` \`dnc_client\` not found.
 
-### 7. Stats
-**GET** \`/stats\`
+<a id="stats-get"></a>
+### \`GET /stats\` — Aggregate Metrics
 
-Returns aggregate metrics for the email finder service.
+No params. Returns totals across all searches ever run.
 
-**Response (JSON)**:
 \`\`\`json
 {
   "total_searches": 100,
@@ -264,31 +341,23 @@ Returns aggregate metrics for the email finder service.
 
 ---
 
----
+<a id="tech-detector"></a>
+## 8. Tech Detector
 
-## Tech Detector
+<a id="detect-tech-post"></a>
+### \`POST /detect-tech\` — Detect Technologies
 
-### 8. Detect Technologies
-**POST** \`/detect-tech\`
+Fetches a URL's HTML and fingerprints its stack via regex pattern matching (no headless browser, no Wappalyzer).
 
-Given a URL, fetches the page HTML and detects web technologies in use (analytics, CMS, payments, marketing tools, etc.) via regex pattern matching.
+**Body (JSON)**: \`url\` (string, **required**) — full URL, e.g. \`"https://example.com"\`.
 
-**Authentication**: Required (Bearer token)
-
-**Request Body (JSON)**:
-| Field | Type | Required | Description |
-|---|---|---|---|
-| \`url\` | String | **Yes** | Full URL to inspect (e.g. "https://example.com"). |
-
-**Example**:
 \`\`\`bash
-curl -X POST -H "Authorization: Bearer your_secret_key" \\
-  -H "Content-Type: application/json" \\
-  -d '{"url": "https://example.com"}' \\
-  {{BASE_URL}}/detect-tech
+curl -X POST {{BASE_URL}}/detect-tech \\
+  -H "Authorization: Bearer your_secret_key" -H "Content-Type: application/json" \\
+  -d '{"url": "https://example.com"}'
 \`\`\`
 
-**Response (JSON)**:
+**Response — success (\`200\`)**:
 \`\`\`json
 {
   "success": true,
@@ -309,101 +378,117 @@ curl -X POST -H "Authorization: Bearer your_secret_key" \\
 }
 \`\`\`
 
-**Response Fields**:
-| Field | Type | Description |
-|---|---|---|
-| \`cms\` | String | Detected CMS name (with version if available), or empty string. |
-| \`ecommerce\` | String | Detected e-commerce platform, or empty string. |
-| \`analytics\` | String[] | Analytics and tracking tools detected. |
-| \`tag_managers\` | String[] | Tag manager tools detected. |
-| \`frameworks\` | String[] | JS frameworks detected (always \`[]\` in current version). |
-| \`marketing\` | String[] | Marketing automation / chat / CRM tools detected. |
-| \`advertising\` | String[] | Paid advertising pixels detected. |
-| \`payments\` | String[] | Payment processors detected. |
-| \`cdn\` | String[] | CDN providers detected. |
-| \`seo\` | String[] | SEO plugins/tools detected. |
-| \`privacy\` | String[] | Cookie consent / privacy tools detected. |
-| \`otros\` | String[] | Any other detected technologies. |
-| \`resumen\` | String | All detected items joined with \` | \` as a single summary string. |
+**Response — fetch failed (\`200\`, \`success: false\`)** — pipelines can branch on this without treating it as an HTTP error:
+\`\`\`json
+{
+  "success": false,
+  "url": "https://broken-site.com",
+  "reason": "domain_not_found",
+  "http_status": 404,
+  "message": "DNS: domain not found",
+  "technologies": "",
+  "scripts": [],
+  "links": [],
+  "meta": []
+}
+\`\`\`
+\`reason\`: \`blocked_by_site\` \\| \`rate_limited_by_site\` \\| \`site_unavailable\` \\| \`domain_not_found\` \\| \`ssl_error\` \\| \`timeout\` \\| \`network_error\`. \`http_status\` is only present when the target site responded with a non-2xx status.
 
-**Error Responses**:
-| Status | Body | Reason |
-|---|---|---|
-| \`400\` | \`{ "error": "url is required" }\` | The \`url\` field is missing from the request body. |
-| \`400\` | \`{ "error": "Invalid URL format" }\` | The provided URL could not be parsed. |
-| \`502\` | \`{ "error": "HTTP {status} desde la URL" }\` | The target URL returned a non-2xx HTTP status. |
-| \`504\` | \`{ "error": "Timeout al obtener la URL" }\` | The request to the target URL timed out (15s limit). |
-| \`500\` | \`{ "error": "..." }\` | Unexpected server error. |
+**Errors**: \`400\` \`{ "error": "url is required" }\`; \`400\` \`{ "error": "Invalid URL format" }\`; \`500\` unexpected server error.
 
 ---
 
-## Do Not Contact (DNC)
+<a id="linkedin-finder"></a>
+## 9. LinkedIn Finder
 
-Manage per-client "Do Not Contact" lists. Each client is identified by a **handle**: the client's name, lowercased, with spaces (and other non-alphanumeric characters) replaced by hyphens and accents stripped. e.g. \`"Acme Corp México"\` → \`acme-corp-mexico\`. The handle is the unified client id.
+<a id="find-linkedin-post"></a>
+### \`POST /find-linkedin\` — Resolve Domain → LinkedIn Company
 
-There are two kinds of DNC list:
+Searches Google (via Serper) for \`site:linkedin.com/company "<domain>"\` and picks the best-matching company page.
+
+**Body (JSON)**: \`url\` or \`domain\` (string, **required**) — either works, both are normalized to a domain.
+
+\`\`\`bash
+curl -X POST {{BASE_URL}}/find-linkedin \\
+  -H "Authorization: Bearer your_secret_key" -H "Content-Type: application/json" \\
+  -d '{"domain": "empresa.com"}'
+\`\`\`
+
+**Response — success (\`200\`)**:
+\`\`\`json
+{
+  "success": true,
+  "input": "empresa.com",
+  "domain": "empresa.com",
+  "linkedin_url": "https://www.linkedin.com/company/empresa-inc",
+  "linkedin_slug": "empresa-inc",
+  "match_type": "domain_in_url",
+  "candidates": [{ "url": "https://www.linkedin.com/company/empresa-inc", "slug": "empresa-inc", "title": "Empresa Inc | LinkedIn", "snippet": "..." }],
+  "cost_usd": 0.001
+}
+\`\`\`
+\`match_type\`: \`domain_in_url\` (slug contains the domain's root name) \\| \`domain_in_snippet\` (domain mentioned in title/snippet) \\| \`first_result\` (fallback to Google's top hit).
+
+**Response — no match / error (\`200\`, \`success: false\`)**:
+\`\`\`json
+{ "success": false, "input": "empresa.com", "domain": "empresa.com", "linkedin_url": null, "linkedin_slug": null, "reason": "no_results", "message": "No LinkedIn company pages found", "cost_usd": 0.001 }
+\`\`\`
+\`reason\`: \`invalid_input\` \\| \`missing_api_key\` \\| \`serper_error\` \\| \`no_results\`.
+
+**Errors**: \`400\` \`{ "error": "url or domain is required" }\`; \`503\` (body is the \`missing_api_key\` result above) when \`SERPER_API_KEY\` isn't configured; \`500\` unexpected.
+
+---
+
+<a id="clients-dnc"></a>
+## 10. Clients & Do Not Contact (DNC)
+
+Each client is identified by a readable **handle**: \`name\` lowercased, accents stripped, non-alphanumeric characters collapsed to hyphens (\`"Acme Corp México"\` → \`acme-corp-mexico\`). The handle is the id used everywhere else (\`dnc_client\`, \`/dnc*\` bodies).
+
+Two DNC list types:
 - **individual** — specific person emails.
-- **domain** — whole company domains. You may also submit an *email* to a domain list: it is decomposed, the domain is blocked, and the original email is stored for reference.
+- **domain** — whole company domains. Submitting an *email* to a domain list decomposes it: the domain is blocked and the original email kept for reference.
 
-A check matches if the email itself was listed **or** the email's domain is blocked.
+A check matches if the email itself was listed **or** its domain is blocked on a domain list.
 
-### 9. Create Client
-**POST** \`/clients\`
+<a id="clients-post"></a>
+### \`POST /clients\` — Create Client
 
-**Request Body (JSON)**:
-| Field | Type | Required | Description |
-|---|---|---|---|
-| \`name\` | String | Yes | Client name. The \`handle\` is derived from it. |
-| \`...\` | Any | No | Any additional fields are stored in the client's \`data\` object. |
+**Body (JSON)**: \`name\` (string, **required**) — handle is derived from it; any other fields are stored in \`data\`.
 
-**Response (JSON)** — \`201 Created\`:
+**Response — \`201\`**:
 \`\`\`json
 {
   "status": "ok",
-  "client": {
-    "id": "uuid",
-    "handle": "acme-corp-mexico",
-    "name": "Acme Corp México",
-    "data": {},
-    "created_at": "...",
-    "updated_at": "..."
-  }
+  "client": { "id": "uuid", "handle": "acme-corp-mexico", "name": "Acme Corp México", "data": {}, "created_at": "...", "updated_at": "..." }
 }
 \`\`\`
 
-**Error Responses**:
-| Status | Body | Reason |
-|---|---|---|
-| \`400\` | \`{ "error": "name is required." }\` | Missing/blank \`name\`. |
-| \`409\` | \`{ "error": "client_already_exists", ... }\` | A client with that handle already exists. |
+**Errors**: \`400\` \`{ "error": "name is required." }\`; \`409\` \`{ "error": "client_already_exists", "message": "...", "handle": "...", "client": { ... } }\`.
 
-### 10. List / Get Clients
-**GET** \`/clients\`
+<a id="clients-get"></a>
+### \`GET /clients\` — List / Get Clients
 
-Lists all clients. Pass \`?handle=<handle>\` to fetch a single client (the handle is normalized before lookup).
+No params → lists all. \`?handle=<handle>\` → fetch one (handle is normalized before lookup).
 
 **Response — list**: \`{ "result": <count>, "clients": [ ... ] }\`
 **Response — single**: \`{ "result": 1, "client": { ... } }\`
 
-**Error Responses**:
-| Status | Body | Reason |
-|---|---|---|
-| \`404\` | \`{ "error": "client_not_found", "handle": "...", "suggestions": ["..."] }\` | No client with that handle. \`suggestions\` lists similar handles. |
+**Errors**: \`404\` \`{ "error": "client_not_found", "message": "...", "handle": "...", "suggestions": ["acme", "acme-inc"] }\` — \`suggestions\` are similar existing handles (substring/Levenshtein match).
 
-### 11. Upload to a DNC List
-**POST** \`/dnc\`
+<a id="dnc-post"></a>
+### \`POST /dnc\` — Upload to a DNC List
 
-**Request Body (JSON)**:
+**Body (JSON)**:
 | Field | Type | Required | Description |
 |---|---|---|---|
-| \`handle\` | String | Yes | Client handle. |
-| \`list_type\` | String | Yes | \`individual\` or \`domain\`. |
-| \`entries\` | String[] | Yes* | Values to add (emails for \`individual\`; emails and/or domains for \`domain\`). |
-| \`entry\` / \`email\` / \`domain\` | String | Yes* | Convenience single-value alternatives to \`entries\`. |
+| \`handle\` | string | Yes | Client handle. |
+| \`list_type\` | string | Yes | \`individual\` or \`domain\`. |
+| \`entries\` | string[] | Yes* | Values to add. |
+| \`entry\` / \`email\` / \`domain\` | string | Yes* | Convenience single-value alternatives, combinable with \`entries\`. |
 
-*At least one value via \`entries\` or one of \`entry\`/\`email\`/\`domain\` is required.* Invalid values are skipped and reported; duplicates are skipped.
+\\* At least one value across \`entries\`/\`entry\`/\`email\`/\`domain\` is required. Invalid values are skipped and reported; duplicates (within the batch or already stored) are skipped silently.
 
-**Response (JSON)** — \`200\`:
+**Response — \`200\`**:
 \`\`\`json
 {
   "status": "ok",
@@ -412,59 +497,189 @@ Lists all clients. Pass \`?handle=<handle>\` to fetch a single client (the handl
   "added": 1,
   "skipped_duplicates": 0,
   "invalid": [],
-  "entries": [
-    { "list_type": "domain", "email": "spammer@evilcorp.com", "domain": "evilcorp.com" }
-  ]
+  "entries": [{ "list_type": "domain", "email": "spammer@evilcorp.com", "domain": "evilcorp.com" }]
 }
 \`\`\`
 
-**Error Responses**:
-| Status | Body | Reason |
-|---|---|---|
-| \`400\` | \`{ "error": "list_type is required and must be one of: individual, domain." }\` | Missing/invalid \`list_type\`. |
-| \`400\` | \`{ "error": "At least one entry is required..." }\` | No entries supplied. |
-| \`404\` | \`{ "error": "client_not_found", ... }\` | Unknown client handle. |
+**Errors**: \`400\` invalid/missing \`list_type\`; \`400\` no entries supplied; \`404\` \`client_not_found\`.
 
-### 12. Check the DNC List
-**POST** \`/dnc/check\`
+<a id="dnc-check-post"></a>
+### \`POST /dnc/check\` — Check the DNC List
 
-Check whether an email should not be contacted for a client.
+**Body (JSON)**: \`handle\` (string, required), \`email\` (string, required).
 
-**Request Body (JSON)**:
-| Field | Type | Required | Description |
-|---|---|---|---|
-| \`handle\` | String | Yes | Client handle. |
-| \`email\` | String | Yes | Email to check. |
-
-**Response (JSON)** — always \`200\` when the client exists:
+**Response — \`200\`** (whenever the client exists):
 \`\`\`json
-{
-  "handle": "acme",
-  "email": "anyone@evilcorp.com",
-  "do_not_contact": true,
-  "matched_by": "domain"
-}
+{ "handle": "acme", "email": "anyone@evilcorp.com", "do_not_contact": true, "matched_by": "domain" }
 \`\`\`
-\`do_not_contact\` is \`true\` if the email is on the list, \`false\` otherwise. \`matched_by\` is \`"email"\`, \`"domain"\`, or \`null\`.
+\`matched_by\`: \`"email"\` \\| \`"domain"\` \\| \`null\`.
 
-**Error Responses**:
-| Status | Body | Reason |
-|---|---|---|
-| \`400\` | \`{ "error": "email is required." }\` | Missing \`email\`. |
-| \`400\` | \`{ "error": "handle is required." }\` | Missing \`handle\`. |
-| \`404\` | \`{ "error": "client_not_found", "handle": "...", "suggestions": ["..."] }\` | Unknown client handle. |
+**Errors**: \`400\` missing \`email\`; \`400\` missing \`handle\`; \`404\` \`client_not_found\`.
 
-### 13. List DNC Entries
-**GET** \`/dnc\`
+<a id="dnc-get"></a>
+### \`GET /dnc\` — List DNC Entries
 
-Pass \`?handle=<handle>\` (required) and optionally \`?list_type=individual|domain\`.
+**Query**: \`handle\` (required), \`list_type\` (optional, \`individual\` \\| \`domain\`).
 
-**Response**: \`{ "handle": "acme", "result": <count>, "entries": [ ... ] }\`
+**Response**: \`{ "handle": "acme", "result": <count>, "entries": [{ "id": "...", "client_id": "...", "list_type": "domain", "email": "...|null", "domain": "...|null", "created_at": "..." }] }\`
+
+**Errors**: \`400\` invalid \`list_type\`; \`404\` \`client_not_found\` (also triggered by a missing/blank \`handle\`, since it's resolved the same way).
+
+<a id="dnc-client-semantics"></a>
+### \`dnc_client\` semantics (on \`GET /profiles\`, \`GET /companies\`, \`POST /find\`, \`POST /verify\`)
+
+Pass \`dnc_client=<handle>\` to gate a lookup behind a client's DNC list, in one call instead of two:
+
+1. \`dnc_client\` doesn't resolve to a known client → \`404\` \`{ "error": "client_not_found", "handle": "...", "suggestions": [...] }\`.
+2. The contact/domain **is** on that client's DNC list → \`200\` with a **minimal** body: \`{ "do_not_contact": true, "matched_by": "email" | "domain" }\`. No profile/company/email data is included.
+3. Otherwise → the endpoint's normal response, with \`"do_not_contact": false\` added.
+
+This lets a single call answer "do we have this contact, and are we even allowed to reach them?" without ever leaking suppressed contact data.
 
 ---
 
-### Pending (Not Yet Implemented)
-- **POST /find/batch** — Batch email finding (accepts array of contacts, processes in background).
-- **POST /verify/batch** — Batch email verification.
-- **Tier 3 verification** — NeverBounce provider ($0.008/email).
+<a id="ai"></a>
+## 11. AI — Copy & Explore (DeepSeek)
+
+Both endpoints call the DeepSeek chat completions API (OpenAI-compatible) and require \`DEEPSEEK_API_KEY\` to be configured server-side.
+
+<a id="copy-post"></a>
+### \`POST /copy\` — Generate Copy
+
+Single-shot prompt → copy generation, defaulted to a direct-response B2B outbound copywriter persona.
+
+**Body (JSON)**:
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| \`prompt\` | string | **Yes** | — | The user prompt/brief. |
+| \`system\` | string | No | Built-in B2B copywriter system prompt | Override the system prompt. |
+| \`model\` | string | No | \`"deepseek-chat"\` | DeepSeek model name. |
+| \`temperature\` | number | No | provider default | Passed through to DeepSeek. |
+| \`max_tokens\` | number | No | provider default | Passed through to DeepSeek. |
+
+\`\`\`bash
+curl -X POST {{BASE_URL}}/copy \\
+  -H "Authorization: Bearer your_secret_key" -H "Content-Type: application/json" \\
+  -d '{"prompt": "Write a 2-line cold email opener for a VP Sales at a Series B SaaS company."}'
+\`\`\`
+
+**Response — \`200\`**:
+\`\`\`json
+{
+  "response": "Hi {{first_name}} — noticed {{company}} just closed its Series B...",
+  "model": "deepseek-chat",
+  "usage": { "prompt_tokens": 120, "completion_tokens": 48, "total_tokens": 168 },
+  "duration_ms": 1450
+}
+\`\`\`
+
+**Errors**: \`400\` \`{ "error": "prompt is required" }\`; \`503\` \`{ "error": "DEEPSEEK_API_KEY is not configured" }\`; \`502\` \`{ "error": "DeepSeek API error (...)" }\` on upstream failure; \`500\` unexpected.
+
+<a id="explore-post"></a>
+### \`POST /explore\` — Research Agent
+
+Runs a tool-using agent loop: DeepSeek can call \`serp_search\` (Google via Serper) and \`fetch_page\` (fetch + strip HTML, SSRF-guarded — blocks localhost/private/link-local IPs and DNS-rebinding, 3 redirects max, ~8000-char truncation) until it produces a final answer.
+
+**Body (JSON)**:
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| \`prompt\` | string | **Yes** | — | The research question/task. |
+| \`max_steps\` | number | No | \`8\` | Max tool calls before forcing a final answer. Hard-capped at \`15\` regardless of the value sent. |
+| \`model\` | string | No | \`"deepseek-chat"\` | DeepSeek model name. |
+
+\`\`\`bash
+curl -X POST {{BASE_URL}}/explore \\
+  -H "Authorization: Bearer your_secret_key" -H "Content-Type: application/json" \\
+  -d '{"prompt": "What CRM does empresa.com use, and since when publicly?", "max_steps": 6}'
+\`\`\`
+
+**Response — \`200\`**:
+\`\`\`json
+{
+  "message": "empresa.com uses HubSpot; their careers page has referenced it since at least 2023.",
+  "steps": [
+    { "step": 1, "tool": "serp_search", "input": { "query": "empresa.com CRM HubSpot" }, "output_summary": "query: empresa.com CRM HubSpot, organic: [...]", "reasoning": "I should search for public mentions first." },
+    { "step": 2, "tool": "fetch_page", "input": { "url": "https://empresa.com/careers" }, "output_summary": "Careers ... HubSpot ..." }
+  ],
+  "total_steps": 2,
+  "usage": { "prompt_tokens": 900, "completion_tokens": 210, "total_tokens": 1110 },
+  "duration_ms": 6200
+}
+\`\`\`
+Each step's \`reasoning\` is the assistant's message content accompanying that tool call (often empty). \`output_summary\` is the tool's JSON/text output truncated to 300 characters.
+
+**Errors**: \`400\` \`{ "error": "prompt is required" }\`; \`400\` \`{ "error": "max_steps must be a positive number" }\`; \`400\` \`{ "error": "model must be a string" }\`; \`503\` \`{ "error": "DEEPSEEK_API_KEY is not configured" }\`; \`502\` upstream DeepSeek failure; \`500\` unexpected.
+
+---
+
+<a id="errors-and-limits"></a>
+## 12. Errors & Limits
+
+**Error format**: every error is JSON with an \`error\` string field (occasionally with extra context fields like \`handle\`/\`suggestions\` on \`404\`s). Tech Detector fetch failures are the one exception — those return \`200\` with \`success: false\` so pipelines can branch without treating them as transport errors.
+
+**Common status codes**:
+| Status | Meaning |
+|---|---|
+| \`400\` | Bad request — missing/invalid field. Body explains which. |
+| \`401\` | Missing/invalid Bearer API key. |
+| \`404\` | Referenced client handle (\`dnc_client\`/\`handle\`) doesn't exist. |
+| \`409\` | \`POST /clients\` — handle already taken. |
+| \`429\` | Rate limit exceeded (see below). |
+| \`500\` | Unexpected server error, or missing \`API_KEY\` server config. |
+| \`502\` | Upstream provider failure (DeepSeek). |
+| \`503\` | Required upstream API key not configured (DeepSeek, or Serper for \`/find-linkedin\`). |
+| \`504\` | Target URL timed out (\`/detect-tech\`, 15s limit). |
+
+**Rate limits** (per IP, sliding 60s window, \`express-rate-limit\` with \`RateLimit-*\` response headers):
+| Scope | Default limit | Env override | Applies to |
+|---|---|---|---|
+| Global | 300 req/min | \`RATE_LIMIT_PER_MIN\` | Every route. |
+| Costly | 30 req/min | \`COSTLY_RATE_LIMIT_PER_MIN\` | \`/find\`, \`/verify\`, \`/detect-tech\`, \`/copy\`, \`/explore\`, \`/find-linkedin\` (stacked on top of the global limit). |
+
+Exceeding a limit returns \`429\` with the plain-text body \`Too many requests, please try again later.\`
+
+**Body size limit**: JSON request bodies are capped at **1mb** (\`express.json({ limit: '1mb' })\`); oversized bodies are rejected before reaching any controller.
+
+**CORS**: open by default; restricted to \`ALLOWED_ORIGINS\` (comma-separated) when that env var is set.
+
+---
+
+<a id="for-ai-agents"></a>
+## 13. For AI Agents
+
+Machine-readable one-liner per endpoint. Base URL: \`{{BASE_URL}}\`. Auth: header \`Authorization: Bearer <API_KEY>\` on every line below (omit only for \`/health\` and \`/docs/api\`).
+
+\`\`\`
+GET  /profiles?email|linkedin|phone&dnc_client? -> {result,...fields,id,email,linkedin_slug,phone,updated_at} | {result:null,message,search_criteria} | {do_not_contact,matched_by}
+POST /profiles {email?,linkedin_url?,linkedin_profile?,phone?,...extra} (>=1 of email/linkedin_url/phone) -> {status,resolved_by,profile_id,saved_data}
+GET  /companies?domain|linkedin&dnc_client? -> {result,...fields,id,domain,linkedin_slug,updated_at} | {result:null,message,search_criteria} | {do_not_contact,matched_by}
+POST /companies {domain?,linkedin_url?,...extra} (>=1 of domain/linkedin_url) -> {status,resolved_by,company_id,saved_data}
+POST /find {domain,first_name?,last_name?,full_name?,max_tier?=2,dnc_client?} (domain required, >=1 name field) -> {success,email,status,confidence,method,pattern,domain_info,serp_info,permutations_tried,cost_usd,duration_ms,do_not_contact?} | {do_not_contact,matched_by}
+POST /verify {email,max_tier?=2,dnc_client?} -> {email,status,confidence,method,domain_info,cost_usd,duration_ms,do_not_contact?} | {do_not_contact,matched_by}
+GET  /stats -> {total_searches,total_valid_found,success_rate,methods_breakdown,total_cost_usd,avg_cost_per_email,domains_in_cache,patterns_learned,catch_all_domains}
+POST /detect-tech {url} -> {success:true,url,cms,ecommerce,analytics[],tag_managers[],frameworks[],marketing[],advertising[],payments[],cdn[],seo[],privacy[],otros[],resumen} | {success:false,url,reason,http_status?,message,technologies,scripts[],links[],meta[]}
+POST /find-linkedin {url|domain} -> {success:true,input,domain,linkedin_url,linkedin_slug,match_type,candidates[],cost_usd} | {success:false,input,domain,linkedin_url:null,linkedin_slug:null,reason,message,cost_usd}
+POST /clients {name,...extra} -> 201 {status,client:{id,handle,name,data,created_at,updated_at}} | 409 {error:"client_already_exists",handle,client}
+GET  /clients?handle? -> {result,clients:[...]} | {result:1,client} | 404 {error:"client_not_found",handle,suggestions[]}
+POST /dnc {handle,list_type:"individual"|"domain",entries[]|entry|email|domain} -> {status,handle,list_type,added,skipped_duplicates,invalid[],entries[]}
+POST /dnc/check {handle,email} -> {handle,email,do_not_contact,matched_by:"email"|"domain"|null}
+GET  /dnc?handle,list_type? -> {handle,result,entries[]}
+POST /copy {prompt,system?,model?="deepseek-chat",temperature?,max_tokens?} -> {response,model,usage,duration_ms} | 503/502 {error}
+POST /explore {prompt,max_steps?=8(cap 15),model?} -> {message,steps:[{step,tool,input,output_summary,reasoning?}],total_steps,usage,duration_ms} | 503/502 {error}
+GET  /health -> "OK" (no auth)
+\`\`\`
+
+Rules for agents: (1) always send \`Authorization: Bearer <API_KEY>\`; (2) before contacting a lead, call \`GET /profiles\`/\`GET /companies\`/\`POST /find\`/\`POST /verify\` with \`dnc_client=<handle>\` and treat any \`{"do_not_contact":true,...}\` response as a hard stop — do not retry without \`dnc_client\` to "get around" a block; (3) \`/find\` and \`/verify\` cost real money per call (see \`GET /stats\` for running totals) — prefer \`GET /profiles\`/\`GET /companies\` cache lookups first; (4) all \`POST\` bodies are JSON, max 1mb; (5) back off and retry with delay on \`429\`.
+
+---
+
+<a id="pending"></a>
+## 14. Pending / Roadmap
+
+Not yet implemented in this API:
+- **\`POST /find/batch\`** — batch email finding (array of contacts, background processing).
+- **\`POST /verify/batch\`** — batch email verification.
+- **Tier 3 verification** — NeverBounce provider.
+
+See \`ROADMAP.md\` in the repo for the full phased plan (hardening, \`/personalize\`, Instantly integration, async jobs, multi-tenant API keys, an MCP server surface, and more).
 `;
