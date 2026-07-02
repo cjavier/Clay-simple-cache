@@ -6,6 +6,8 @@ import { techDetectorController } from './controllers/tech-detector.controller';
 import { linkedinFinderController } from './controllers/linkedin-finder.controller';
 import { clientsController } from './controllers/clients.controller';
 import { dncController } from './controllers/dnc.controller';
+import { copyController } from './controllers/copy.controller';
+import { exploreController } from './controllers/explore.controller';
 
 import { docsController } from './controllers/docs.controller';
 import { authMiddleware } from './middleware/auth.middleware';
@@ -39,6 +41,12 @@ router.get('/clients', authMiddleware, clientsController.list);
 router.post('/dnc', authMiddleware, dncController.upload);
 router.post('/dnc/check', authMiddleware, dncController.check);
 router.get('/dnc', authMiddleware, dncController.list);
+
+// Copy Generation (DeepSeek)
+router.post('/copy', authMiddleware, copyController.generate);
+
+// Explore Agent (DeepSeek + function calling)
+router.post('/explore', authMiddleware, exploreController.explore);
 
 router.get('/docs/api', docsController.get);
 
