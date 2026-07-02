@@ -6,7 +6,7 @@ import {
   DeepSeekMessage,
 } from "../services/deepseek.service";
 
-const DEFAULT_SYSTEM_PROMPT =
+export const DEFAULT_SYSTEM_PROMPT =
   "You are a direct-response B2B copywriter for an outbound sales/GTM agency. " +
   "Write clear, concrete, persuasive outreach copy (emails, LinkedIn messages, ad copy, etc). " +
   "Respond only with the requested copy — no preambles, no meta-commentary, no explanations.";

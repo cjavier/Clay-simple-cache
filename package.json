@@ -27,6 +27,7 @@
   },
   "homepage": "https://github.com/cjavier/Clay-simple-cache#readme",
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@prisma/client": "^5.22.0",
     "@supabase/supabase-js": "^2.89.0",
     "cors": "^2.8.5",
@@ -34,7 +35,8 @@
     "express": "^5.2.1",
     "express-rate-limit": "^8.5.2",
     "libphonenumber-js": "^1.12.33",
-    "prisma": "^5.22.0"
+    "prisma": "^5.22.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/cors": "^2.8.19",

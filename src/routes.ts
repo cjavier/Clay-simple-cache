@@ -8,6 +8,7 @@ import { clientsController } from './controllers/clients.controller';
 import { dncController } from './controllers/dnc.controller';
 import { copyController } from './controllers/copy.controller';
 import { exploreController } from './controllers/explore.controller';
+import { mcpController } from './controllers/mcp.controller';
 
 import { docsController } from './controllers/docs.controller';
 import { authMiddleware } from './middleware/auth.middleware';
@@ -48,6 +49,12 @@ router.post('/copy', authMiddleware, copyController.generate);
 // Explore Agent (DeepSeek + function calling)
 router.post('/explore', authMiddleware, exploreController.explore);
 
+// MCP (Model Context Protocol) server — Streamable HTTP, stateless.
+router.post('/mcp', authMiddleware, mcpController.handle);
+router.get('/mcp', authMiddleware, mcpController.methodNotAllowed);
+router.delete('/mcp', authMiddleware, mcpController.methodNotAllowed);
+
 router.get('/docs/api', docsController.get);
+router.get('/llms.txt', docsController.llmsTxt);
 
 export default router;

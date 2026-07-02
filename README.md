@@ -2,7 +2,9 @@
 
 Identity cache, email finder, tech stack detection, LinkedIn resolution, per-client Do Not Contact (DNC) lists, and DeepSeek-backed AI endpoints (copy generation + a web-research agent) for a GTM outbound agency. Allows upserting People/Company records based on normalized keys and merging enrichment data into a unified record over time.
 
-Full endpoint reference (request/response shapes, error codes, curl examples, and a compact machine-readable summary for AI agents) is served live at `GET /docs/api` — see [Docs](#docs) below.
+Consumed both as a REST API and as an [MCP server](#mcp-server--agent-access) (Streamable HTTP), so it's built to be driven directly by AI agents (Claude Code, claude.ai, etc.) as much as by traditional backend code.
+
+Full endpoint reference (request/response shapes, error codes, curl examples, and a compact machine-readable summary for AI agents) is served live at `GET /docs/api` — see [Docs](#docs) below. A plain-text summary for agents is also served at `GET /llms.txt`.
 
 ## Features
 - **Profiles**:
@@ -238,7 +240,38 @@ Not yet implemented in this API:
 - `POST /verify/batch` — Batch email verification.
 - Tier 3 verification provider (NeverBounce).
 
-See [`ROADMAP.md`](./ROADMAP.md) for the full phased plan: production hardening, a `/personalize` copy engine with per-client voice profiles, Instantly campaign integration, async enrichment jobs, multi-tenant API keys/usage metering, and an MCP server surface for agents.
+See [`ROADMAP.md`](./ROADMAP.md) for the full phased plan: production hardening, a `/personalize` copy engine with per-client voice profiles, Instantly campaign integration, async enrichment jobs, and multi-tenant API keys/usage metering. The MCP server surface mentioned there is now live — see [MCP Server & agent access](#mcp-server--agent-access) above.
+
+## MCP Server & agent access
+
+Beyond the REST API, this service is exposed as an [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server, so Claude Code, claude.ai, or any other MCP-capable agent can use it as a tool source directly — no custom HTTP client needed.
+
+- **URL**: `<host>/mcp`
+- **Transport**: Streamable HTTP (`StreamableHTTPServerTransport`), **stateless** — a fresh server+transport pair is created per request, no session id. `GET`/`DELETE /mcp` return `405` (nothing to open/close without sessions).
+- **Auth**: same Bearer `API_KEY` as the REST API.
+- **Tools** (16): `find_email`, `verify_email`, `get_profile`, `upsert_profile`, `get_company`, `upsert_company`, `detect_tech`, `find_linkedin`, `list_clients`, `create_client`, `dnc_check`, `dnc_add`, `dnc_list`, `generate_copy`, `explore`, `get_stats` — mirroring the REST endpoints above, calling straight into the service layer (no internal HTTP hop). Full descriptions/inputs are in `GET /docs/api` (section "MCP Server") and `GET /llms.txt`.
+
+**Connect from Claude Code**:
+```bash
+claude mcp add --transport http clay-cache https://<host>/mcp --header "Authorization: Bearer <API_KEY>"
+```
+
+**Connect from claude.ai**: Settings → Connectors → Add custom connector → URL `https://<host>/mcp`, with header `Authorization: Bearer <API_KEY>`.
+
+**`.mcp.json`**:
+```json
+{
+  "mcpServers": {
+    "clay-cache": {
+      "type": "http",
+      "url": "https://<host>/mcp",
+      "headers": { "Authorization": "Bearer <API_KEY>" }
+    }
+  }
+}
+```
+
+`GET /llms.txt` (no auth) serves a compact, plain-text summary of the whole service (REST endpoints + MCP tools + agent rules) meant to be pasted directly into an agent's context.
 
 ## Testing
 

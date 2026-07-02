@@ -1,3 +1,5 @@
+import { REST_ENDPOINTS_SUMMARY, MCP_TOOLS_SUMMARY, AGENT_RULES } from './agents';
+
 export const apiDocumentation = `# Clay Cache API
 
 **Identity cache · Email finder · Tech detection · LinkedIn resolver · Do Not Contact lists · GTM AI**
@@ -57,9 +59,10 @@ curl -H "Authorization: Bearer your_secret_key" {{BASE_URL}}/profiles?email=test
   - [\`dnc_client\` semantics](#dnc-client-semantics)
 - [11. AI — Copy & Explore (DeepSeek)](#ai)
   - [\`POST /copy\`](#copy-post) · [\`POST /explore\`](#explore-post)
-- [12. Errors & Limits](#errors-and-limits)
-- [13. For AI Agents (llms.txt style)](#for-ai-agents)
-- [14. Pending / Roadmap](#pending)
+- [12. MCP Server](#mcp-server)
+- [13. Errors & Limits](#errors-and-limits)
+- [14. For AI Agents (llms.txt style)](#for-ai-agents)
+- [15. Pending / Roadmap](#pending)
 
 ---
 
@@ -84,6 +87,9 @@ curl -H "Authorization: Bearer your_secret_key" {{BASE_URL}}/profiles?email=test
 | \`GET\` | \`/dnc\` | List a client's DNC entries. | [Clients & DNC](#dnc-get) |
 | \`POST\` | \`/copy\` | Generate copy from a prompt (DeepSeek). | [AI](#copy-post) |
 | \`POST\` | \`/explore\` | Run a research agent (SERP + page fetch, DeepSeek). | [AI](#explore-post) |
+| \`POST\` | \`/mcp\` | MCP (Model Context Protocol) JSON-RPC endpoint — Streamable HTTP, stateless. | [MCP Server](#mcp-server) |
+| \`GET\`/\`DELETE\` | \`/mcp\` | \`405\` — this MCP server is stateless (no sessions to fetch/delete). | [MCP Server](#mcp-server) |
+| \`GET\` | \`/llms.txt\` | Machine-readable service summary for LLM agents (no auth). | [MCP Server](#mcp-server) |
 | \`GET\` | \`/health\` | Liveness check (no auth). Returns \`OK\`. | — |
 | \`GET\` | \`/docs/api\` | This page (no auth). | — |
 | \`GET\` | \`/\` | Redirects to \`/docs/api\`. | — |
@@ -612,8 +618,63 @@ Each step's \`reasoning\` is the assistant's message content accompanying that t
 
 ---
 
+<a id="mcp-server"></a>
+## 12. MCP Server
+
+This service is also exposed as an [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server, so it can be wired directly into Claude Code, claude.ai, or any other MCP-capable agent as a tool source — no custom REST client needed.
+
+- **URL**: \`{{BASE_URL}}/mcp\`
+- **Transport**: Streamable HTTP (\`StreamableHTTPServerTransport\`), **stateless** — every request creates a fresh server+transport pair, there is no session to keep alive. \`GET\`/\`DELETE\` on \`/mcp\` return \`405\` (nothing to fetch/delete without sessions).
+- **Auth**: same Bearer API key as the REST API — header \`Authorization: Bearer <API_KEY>\` on the HTTP connection/request.
+- **Protocol**: standard JSON-RPC 2.0 MCP messages (\`initialize\`, \`tools/list\`, \`tools/call\`, ...).
+
+**Tools** (16 total — same underlying logic as the REST endpoints above, called directly against the service layer):
+
+| Tool | Input | Description |
+|---|---|---|
+| \`find_email\` | \`{first_name?,last_name?,full_name?,domain,max_tier?,dnc_client?}\` | Find + verify a person's most likely email at a domain. Costs money; DNC-gated. |
+| \`verify_email\` | \`{email,max_tier?,dnc_client?}\` | Verify deliverability of an existing email. Costs money; DNC-gated. |
+| \`get_profile\` | \`{email?,linkedin?,phone?,dnc_client?}\` | Read-only cache lookup for a person profile. |
+| \`upsert_profile\` | \`{email?,linkedin_url?,phone?,data?}\` | Save/enrich a person profile in the cache. |
+| \`get_company\` | \`{domain?,linkedin_slug?,dnc_client?}\` | Read-only cache lookup for a company. |
+| \`upsert_company\` | \`{domain?,linkedin_slug?,data?}\` | Save/enrich a company in the cache. |
+| \`detect_tech\` | \`{url}\` | Fingerprint a site's CMS/ecommerce/analytics/ads stack. |
+| \`find_linkedin\` | \`{domain}\` | Resolve a domain to its LinkedIn company URL. |
+| \`list_clients\` | \`{}\` | Read-only list of clients and their handles. |
+| \`create_client\` | \`{name,handle?}\` | Create a client (handle derived from name if omitted). |
+| \`dnc_check\` | \`{client,email}\` | Read-only Do Not Contact check — call before contacting a lead in a client campaign. |
+| \`dnc_add\` | \`{client,list_type,entries[]}\` | Add emails/domains to a client's Do Not Contact list. |
+| \`dnc_list\` | \`{client,list_type?}\` | Read-only listing of a client's Do Not Contact entries. |
+| \`generate_copy\` | \`{prompt,system?,temperature?,max_tokens?}\` | Generate B2B outbound copy via DeepSeek. |
+| \`explore\` | \`{prompt,max_steps?}\` | Run a web-research agent (SERP + page fetch) and return its findings. |
+| \`get_stats\` | \`{}\` | Read-only aggregate email finder usage/cost metrics. |
+
+**Connecting from Claude Code**:
+\`\`\`bash
+claude mcp add --transport http clay-cache {{BASE_URL}}/mcp --header "Authorization: Bearer <API_KEY>"
+\`\`\`
+
+**Connecting from claude.ai**: Settings → Connectors → Add custom connector → URL \`{{BASE_URL}}/mcp\`, with an \`Authorization: Bearer <API_KEY>\` header.
+
+**\`.mcp.json\`** (for projects that check in MCP config):
+\`\`\`json
+{
+  "mcpServers": {
+    "clay-cache": {
+      "type": "http",
+      "url": "{{BASE_URL}}/mcp",
+      "headers": { "Authorization": "Bearer <API_KEY>" }
+    }
+  }
+}
+\`\`\`
+
+See also \`GET /llms.txt\` for a compact, plain-text version of this whole page meant to be pasted directly into an agent's context.
+
+---
+
 <a id="errors-and-limits"></a>
-## 12. Errors & Limits
+## 13. Errors & Limits
 
 **Error format**: every error is JSON with an \`error\` string field (occasionally with extra context fields like \`handle\`/\`suggestions\` on \`404\`s). Tech Detector fetch failures are the one exception — those return \`200\` with \`success: false\` so pipelines can branch without treating them as transport errors.
 
@@ -645,41 +706,33 @@ Exceeding a limit returns \`429\` with the plain-text body \`Too many requests, 
 ---
 
 <a id="for-ai-agents"></a>
-## 13. For AI Agents
+## 14. For AI Agents
 
-Machine-readable one-liner per endpoint. Base URL: \`{{BASE_URL}}\`. Auth: header \`Authorization: Bearer <API_KEY>\` on every line below (omit only for \`/health\` and \`/docs/api\`).
+Machine-readable one-liner per endpoint. Base URL: \`{{BASE_URL}}\`. Auth: header \`Authorization: Bearer <API_KEY>\` on every line below (omit only for \`/health\`, \`/docs/api\`, and \`/llms.txt\`).
 
 \`\`\`
-GET  /profiles?email|linkedin|phone&dnc_client? -> {result,...fields,id,email,linkedin_slug,phone,updated_at} | {result:null,message,search_criteria} | {do_not_contact,matched_by}
-POST /profiles {email?,linkedin_url?,linkedin_profile?,phone?,...extra} (>=1 of email/linkedin_url/phone) -> {status,resolved_by,profile_id,saved_data}
-GET  /companies?domain|linkedin&dnc_client? -> {result,...fields,id,domain,linkedin_slug,updated_at} | {result:null,message,search_criteria} | {do_not_contact,matched_by}
-POST /companies {domain?,linkedin_url?,...extra} (>=1 of domain/linkedin_url) -> {status,resolved_by,company_id,saved_data}
-POST /find {domain,first_name?,last_name?,full_name?,max_tier?=2,dnc_client?} (domain required, >=1 name field) -> {success,email,status,confidence,method,pattern,domain_info,serp_info,permutations_tried,cost_usd,duration_ms,do_not_contact?} | {do_not_contact,matched_by}
-POST /verify {email,max_tier?=2,dnc_client?} -> {email,status,confidence,method,domain_info,cost_usd,duration_ms,do_not_contact?} | {do_not_contact,matched_by}
-GET  /stats -> {total_searches,total_valid_found,success_rate,methods_breakdown,total_cost_usd,avg_cost_per_email,domains_in_cache,patterns_learned,catch_all_domains}
-POST /detect-tech {url} -> {success:true,url,cms,ecommerce,analytics[],tag_managers[],frameworks[],marketing[],advertising[],payments[],cdn[],seo[],privacy[],otros[],resumen} | {success:false,url,reason,http_status?,message,technologies,scripts[],links[],meta[]}
-POST /find-linkedin {url|domain} -> {success:true,input,domain,linkedin_url,linkedin_slug,match_type,candidates[],cost_usd} | {success:false,input,domain,linkedin_url:null,linkedin_slug:null,reason,message,cost_usd}
-POST /clients {name,...extra} -> 201 {status,client:{id,handle,name,data,created_at,updated_at}} | 409 {error:"client_already_exists",handle,client}
-GET  /clients?handle? -> {result,clients:[...]} | {result:1,client} | 404 {error:"client_not_found",handle,suggestions[]}
-POST /dnc {handle,list_type:"individual"|"domain",entries[]|entry|email|domain} -> {status,handle,list_type,added,skipped_duplicates,invalid[],entries[]}
-POST /dnc/check {handle,email} -> {handle,email,do_not_contact,matched_by:"email"|"domain"|null}
-GET  /dnc?handle,list_type? -> {handle,result,entries[]}
-POST /copy {prompt,system?,model?="deepseek-chat",temperature?,max_tokens?} -> {response,model,usage,duration_ms} | 503/502 {error}
-POST /explore {prompt,max_steps?=8(cap 15),model?} -> {message,steps:[{step,tool,input,output_summary,reasoning?}],total_steps,usage,duration_ms} | 503/502 {error}
-GET  /health -> "OK" (no auth)
+${REST_ENDPOINTS_SUMMARY}
 \`\`\`
 
-Rules for agents: (1) always send \`Authorization: Bearer <API_KEY>\`; (2) before contacting a lead, call \`GET /profiles\`/\`GET /companies\`/\`POST /find\`/\`POST /verify\` with \`dnc_client=<handle>\` and treat any \`{"do_not_contact":true,...}\` response as a hard stop — do not retry without \`dnc_client\` to "get around" a block; (3) \`/find\` and \`/verify\` cost real money per call (see \`GET /stats\` for running totals) — prefer \`GET /profiles\`/\`GET /companies\` cache lookups first; (4) all \`POST\` bodies are JSON, max 1mb; (5) back off and retry with delay on \`429\`.
+This same service is also reachable as an **MCP server** at \`{{BASE_URL}}/mcp\` (Streamable HTTP, stateless, same Bearer auth) — see [12. MCP Server](#mcp-server). Tools, one-liner each:
+
+\`\`\`
+${MCP_TOOLS_SUMMARY}
+\`\`\`
+
+${AGENT_RULES}
+
+A plain-text, agent-friendly version of this whole summary (REST + MCP) is also served at \`GET /llms.txt\` (no auth) — convenient to paste directly into an agent's system prompt or fetch at connection time.
 
 ---
 
 <a id="pending"></a>
-## 14. Pending / Roadmap
+## 15. Pending / Roadmap
 
 Not yet implemented in this API:
 - **\`POST /find/batch\`** — batch email finding (array of contacts, background processing).
 - **\`POST /verify/batch\`** — batch email verification.
 - **Tier 3 verification** — NeverBounce provider.
 
-See \`ROADMAP.md\` in the repo for the full phased plan (hardening, \`/personalize\`, Instantly integration, async jobs, multi-tenant API keys, an MCP server surface, and more).
+See \`ROADMAP.md\` in the repo for the full phased plan (hardening, \`/personalize\`, Instantly integration, async jobs, multi-tenant API keys, and more). The MCP server surface mentioned there is now live — see [12. MCP Server](#mcp-server).
 `;
