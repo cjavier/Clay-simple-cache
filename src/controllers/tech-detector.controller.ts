@@ -37,7 +37,8 @@ export const techDetectorController = {
         });
         return;
       }
-      res.status(500).json({ error: error.message || "Internal server error" });
+      console.error("Tech Detector Error:", error);
+      res.status(500).json({ error: "Internal server error" });
     }
   },
 };

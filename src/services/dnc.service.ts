@@ -168,6 +168,29 @@ export const dncService = {
     },
 
     /**
+     * Check whether a domain is on a client's DNC list (domain-type entries only).
+     */
+    async checkDomain(clientId: string, domain: string): Promise<DncCheckResult> {
+        const normalizedDomain = normalizeDomain(domain);
+        if (!normalizedDomain) {
+            return { do_not_contact: false, matched_by: null };
+        }
+
+        const match = await prisma.dncEntry.findFirst({
+            where: {
+                client_id: clientId,
+                domain: normalizedDomain,
+            },
+        });
+
+        if (!match) {
+            return { do_not_contact: false, matched_by: null };
+        }
+
+        return { do_not_contact: true, matched_by: 'domain' };
+    },
+
+    /**
      * List a client's DNC entries, optionally filtered by list type.
      */
     async listEntries(clientId: string, listType?: DncListType): Promise<DncEntry[]> {

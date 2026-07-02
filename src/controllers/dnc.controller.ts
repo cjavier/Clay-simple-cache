@@ -53,7 +53,7 @@ export const dncController = {
             });
         } catch (error: any) {
             console.error('DNC Upload Error:', error);
-            res.status(500).json({ error: error.message || 'Internal Server Error' });
+            res.status(500).json({ error: 'Internal server error' });
         }
     },
 
@@ -85,7 +85,7 @@ export const dncController = {
             });
         } catch (error: any) {
             console.error('DNC Check Error:', error);
-            res.status(500).json({ error: error.message || 'Internal Server Error' });
+            res.status(500).json({ error: 'Internal server error' });
         }
     },
 
@@ -116,7 +116,7 @@ export const dncController = {
             });
         } catch (error: any) {
             console.error('DNC List Error:', error);
-            res.status(500).json({ error: error.message || 'Internal Server Error' });
+            res.status(500).json({ error: 'Internal server error' });
         }
     }
 };

@@ -1,11 +1,13 @@
 import { Request, Response } from "express";
 import { findEmail, verifySingleEmail } from "../email-finder";
 import prisma from "../db/prisma";
+import { dncService } from "../services/dnc.service";
+import { resolveClientOr404 } from "./client-resolver";
 
 export const emailFinderController = {
   async find(req: Request, res: Response) {
     try {
-      const { first_name, last_name, domain, full_name, max_tier } = req.body;
+      const { first_name, last_name, domain, full_name, max_tier, dnc_client } = req.body;
 
       if (!domain) {
         res.status(400).json({ error: "domain is required" });
@@ -19,6 +21,26 @@ export const emailFinderController = {
         return;
       }
 
+      // Optional Do-Not-Contact check. Only kicks in when `dnc_client` is
+      // provided so existing callers see unchanged behavior/response shape.
+      const dncRequested = !!dnc_client;
+      let dncClientId: string | undefined;
+      if (dncRequested) {
+        const client = await resolveClientOr404(res, dnc_client);
+        if (!client) return;
+        dncClientId = client.id;
+
+        // Check the domain up front, before spending on the search.
+        const domainCheck = await dncService.checkDomain(dncClientId, domain);
+        if (domainCheck.do_not_contact) {
+          res.status(200).json({
+            do_not_contact: true,
+            matched_by: domainCheck.matched_by,
+          });
+          return;
+        }
+      }
+
       const result = await findEmail({
         first_name,
         last_name,
@@ -26,6 +48,17 @@ export const emailFinderController = {
         full_name,
         max_tier: max_tier || 2,
       });
+
+      if (dncClientId && result.email) {
+        const emailCheck = await dncService.check(dncClientId, result.email);
+        if (emailCheck.do_not_contact) {
+          res.status(200).json({
+            do_not_contact: true,
+            matched_by: emailCheck.matched_by,
+          });
+          return;
+        }
+      }
 
       res.json({
         success: true,
@@ -39,19 +72,38 @@ export const emailFinderController = {
         permutations_tried: result.permutations_tried,
         cost_usd: result.cost_usd,
         duration_ms: result.duration_ms,
+        ...(dncRequested ? { do_not_contact: false } : {}),
       });
     } catch (error: any) {
-      res.status(500).json({ error: error.message || "Internal server error" });
+      console.error("Email Finder Find Error:", error);
+      res.status(500).json({ error: "Internal server error" });
     }
   },
 
   async verify(req: Request, res: Response) {
     try {
-      const { email, max_tier } = req.body;
+      const { email, max_tier, dnc_client } = req.body;
 
       if (!email) {
         res.status(400).json({ error: "email is required" });
         return;
+      }
+
+      // Optional Do-Not-Contact check. Only kicks in when `dnc_client` is
+      // provided so existing callers see unchanged behavior/response shape.
+      const dncRequested = !!dnc_client;
+      if (dncRequested) {
+        const client = await resolveClientOr404(res, dnc_client);
+        if (!client) return;
+
+        const emailCheck = await dncService.check(client.id, email);
+        if (emailCheck.do_not_contact) {
+          res.status(200).json({
+            do_not_contact: true,
+            matched_by: emailCheck.matched_by,
+          });
+          return;
+        }
       }
 
       const result = await verifySingleEmail(email, max_tier || 2);
@@ -64,9 +116,11 @@ export const emailFinderController = {
         domain_info: result.domain_info,
         cost_usd: result.cost_usd,
         duration_ms: result.duration_ms,
+        ...(dncRequested ? { do_not_contact: false } : {}),
       });
     } catch (error: any) {
-      res.status(500).json({ error: error.message || "Internal server error" });
+      console.error("Email Finder Verify Error:", error);
+      res.status(500).json({ error: "Internal server error" });
     }
   },
 
@@ -113,7 +167,8 @@ export const emailFinderController = {
         catch_all_domains: catchAllCount,
       });
     } catch (error: any) {
-      res.status(500).json({ error: error.message || "Internal server error" });
+      console.error("Email Finder Stats Error:", error);
+      res.status(500).json({ error: "Internal server error" });
     }
   },
 };

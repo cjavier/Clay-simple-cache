@@ -64,7 +64,7 @@ export const clientsController = {
             });
         } catch (error: any) {
             console.error('Create Client Error:', error);
-            res.status(500).json({ error: error.message || 'Internal Server Error' });
+            res.status(500).json({ error: 'Internal server error' });
         }
     },
 
@@ -91,7 +91,7 @@ export const clientsController = {
             res.json({ result: clients.length, clients });
         } catch (error: any) {
             console.error('List Clients Error:', error);
-            res.status(500).json({ error: error.message || 'Internal Server Error' });
+            res.status(500).json({ error: 'Internal server error' });
         }
     }
 };

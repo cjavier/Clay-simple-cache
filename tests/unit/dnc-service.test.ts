@@ -1,5 +1,20 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
+
+// Mock Prisma before importing the service (checkDomain hits the DB).
+vi.mock("../../src/db/prisma", () => ({
+  default: {
+    dncEntry: {
+      findFirst: vi.fn(),
+      findMany: vi.fn(),
+      createMany: vi.fn(),
+    },
+  },
+}));
+
 import { dncService } from "../../src/services/dnc.service";
+import prisma from "../../src/db/prisma";
+
+const mockPrisma = prisma as any;
 
 describe("dncService.prepareEntry", () => {
   describe("individual list", () => {
@@ -52,5 +67,43 @@ describe("dncService.prepareEntry", () => {
     it("rejects an invalid domain", () => {
       expect(dncService.prepareEntry("localhost", "domain")).toBeNull();
     });
+  });
+});
+
+describe("dncService.checkDomain", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("normalizes the input domain before querying and reports a domain match", async () => {
+    mockPrisma.dncEntry.findFirst.mockResolvedValueOnce({
+      id: "1",
+      client_id: "client-1",
+      list_type: "domain",
+      email: null,
+      domain: "acme.com",
+    });
+
+    const result = await dncService.checkDomain("client-1", "https://www.Acme.com/");
+
+    expect(mockPrisma.dncEntry.findFirst).toHaveBeenCalledWith({
+      where: { client_id: "client-1", domain: "acme.com" },
+    });
+    expect(result).toEqual({ do_not_contact: true, matched_by: "domain" });
+  });
+
+  it("returns do_not_contact: false when no matching entry exists", async () => {
+    mockPrisma.dncEntry.findFirst.mockResolvedValueOnce(null);
+
+    const result = await dncService.checkDomain("client-1", "notblocked.com");
+
+    expect(result).toEqual({ do_not_contact: false, matched_by: null });
+  });
+
+  it("returns do_not_contact: false without querying the DB for an invalid domain", async () => {
+    const result = await dncService.checkDomain("client-1", "not a domain");
+
+    expect(result).toEqual({ do_not_contact: false, matched_by: null });
+    expect(mockPrisma.dncEntry.findFirst).not.toHaveBeenCalled();
   });
 });
