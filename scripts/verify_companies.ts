@@ -1,4 +1,4 @@
-import { normalizeDomain } from './services/normalization';
+import { normalizeDomain } from '../src/services/normalization';
 
 const tests = [
     // Domain

@@ -1,4 +1,4 @@
-import { normalizeEmail, normalizeLinkedIn, normalizePhone } from './services/normalization';
+import { normalizeEmail, normalizeLinkedIn, normalizePhone } from '../src/services/normalization';
 
 const tests = [
     // Email

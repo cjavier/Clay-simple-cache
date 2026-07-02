@@ -1,4 +1,4 @@
-import { normalizeLinkedIn } from './services/normalization';
+import { normalizeLinkedIn } from '../src/services/normalization';
 
 const tests = [
     // Profiles
