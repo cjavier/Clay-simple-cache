@@ -19,7 +19,14 @@ const RESPONSE_MAP: Record<string, { status: EmailStatus; confidence: number }> 
   error: { status: EmailStatus.unknown, confidence: 0.0 },
 };
 
-let creditsExhausted = false;
+// EmailListVerify's "error" response is a generic/transient failure (e.g. a
+// bad request or a momentary upstream hiccup) and does NOT mean the account
+// is out of credits — only "error_credit" does. Disabling the provider on
+// every "error" was effectively a permanent outage after a single bad call.
+// Instead, only "error_credit" trips the breaker, and it self-heals after a
+// TTL instead of requiring a process restart.
+const CREDITS_EXHAUSTED_TTL_MS = 10 * 60 * 1000; // 10 minutes
+let creditsExhaustedUntil = 0;
 
 export class EmailListVerifyProvider implements EmailVerificationProvider {
   name = "emaillistverify";
@@ -44,7 +51,7 @@ export class EmailListVerifyProvider implements EmailVerificationProvider {
       duration_ms: 0,
     };
 
-    if (creditsExhausted) return base;
+    if (Date.now() < creditsExhaustedUntil) return base;
 
     try {
       const url = `https://apps.emaillistverify.com/api/verifyEmail?secret=${encodeURIComponent(config.emaillistverify_api_key)}&email=${encodeURIComponent(email)}`;
@@ -56,8 +63,14 @@ export class EmailListVerifyProvider implements EmailVerificationProvider {
 
       const text = (await response.text()).trim().toLowerCase();
 
-      if (text === "error_credit" || text === "error") {
-        creditsExhausted = true;
+      if (text === "error_credit") {
+        creditsExhaustedUntil = Date.now() + CREDITS_EXHAUSTED_TTL_MS;
+        return base;
+      }
+
+      // Generic "error" is transient — don't disable the provider, just
+      // report unknown for this call.
+      if (text === "error") {
         return base;
       }
 

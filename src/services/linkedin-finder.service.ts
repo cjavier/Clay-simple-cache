@@ -32,7 +32,11 @@ interface SerperResponse {
 
 const COMPANY_URL_REGEX = /linkedin\.com\/company\/([^\/?#"\s]+)/i;
 
+const SERPER_TIMEOUT_MS = 15_000;
+
 async function serperSearch(query: string): Promise<SerperResponse | null> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), SERPER_TIMEOUT_MS);
   try {
     const response = await fetch("https://google.serper.dev/search", {
       method: "POST",
@@ -41,11 +45,14 @@ async function serperSearch(query: string): Promise<SerperResponse | null> {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ q: query, num: 10 }),
+      signal: controller.signal,
     });
     if (!response.ok) return null;
     return (await response.json()) as SerperResponse;
   } catch {
     return null;
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 

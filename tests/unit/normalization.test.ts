@@ -129,6 +129,26 @@ describe("normalizeDomain", () => {
   it("trims whitespace", () => {
     expect(normalizeDomain("  google.com  ")).toBe("google.com");
   });
+
+  it("strips a path suffix", () => {
+    expect(normalizeDomain("example.com/foo")).toBe("example.com");
+  });
+
+  it("strips a path suffix with protocol and www", () => {
+    expect(normalizeDomain("https://www.example.com/foo/bar")).toBe("example.com");
+  });
+
+  it("strips a port", () => {
+    expect(normalizeDomain("example.com:8080")).toBe("example.com");
+  });
+
+  it("strips a port and a path together", () => {
+    expect(normalizeDomain("example.com:8080/foo")).toBe("example.com");
+  });
+
+  it("strips query params via the path cut", () => {
+    expect(normalizeDomain("example.com/foo?bar=baz")).toBe("example.com");
+  });
 });
 
 describe("slugifyHandle", () => {

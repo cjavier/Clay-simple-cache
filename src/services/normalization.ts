@@ -143,8 +143,11 @@ export function levenshtein(a: string, b: string): number {
 }
 
 /**
- * Normalizes domain: trim, toLowerCase, remove protocol/www
+ * Normalizes domain: trim, toLowerCase, remove protocol/www, and strip any
+ * path/query/hash/port so only the bare hostname remains.
  * e.g. "https://www.google.com/" -> "google.com"
+ * e.g. "example.com/foo" -> "example.com"
+ * e.g. "example.com:8080" -> "example.com"
  */
 export function normalizeDomain(domain: string): string | null {
     try {
@@ -157,7 +160,15 @@ export function normalizeDomain(domain: string): string | null {
         // Remove www.
         if (cleanDomain.startsWith('www.')) cleanDomain = cleanDomain.slice(4);
 
-        // Remove trailing slash
+        // Strip any path/query/hash (cut at first "/")
+        const slashIndex = cleanDomain.indexOf('/');
+        if (slashIndex !== -1) cleanDomain = cleanDomain.slice(0, slashIndex);
+
+        // Strip any port (cut at first ":")
+        const colonIndex = cleanDomain.indexOf(':');
+        if (colonIndex !== -1) cleanDomain = cleanDomain.slice(0, colonIndex);
+
+        // Remove trailing slash (defensive, in case cleanDomain ended up empty after slicing)
         if (cleanDomain.endsWith('/')) cleanDomain = cleanDomain.slice(0, -1);
 
         // Basic validation: should have at least one dot

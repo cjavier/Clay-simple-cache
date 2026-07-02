@@ -6,12 +6,16 @@ export interface SerpEmailResult {
   cost_usd: number;
 }
 
+const SERPER_TIMEOUT_MS = 15_000;
+
 /**
  * Run a single Serper search and return raw organic results.
  */
 async function serperSearch(
   query: string
 ): Promise<{ organic: any[]; knowledgeGraph?: any; peopleAlsoAsk?: any[] } | null> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), SERPER_TIMEOUT_MS);
   try {
     const response = await fetch("https://google.serper.dev/search", {
       method: "POST",
@@ -20,11 +24,14 @@ async function serperSearch(
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ q: query, num: 20 }),
+      signal: controller.signal,
     });
     if (!response.ok) return null;
     return await response.json();
   } catch {
     return null;
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 

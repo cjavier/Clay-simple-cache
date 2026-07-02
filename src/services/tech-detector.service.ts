@@ -1,4 +1,5 @@
 import { TechResult } from "../types";
+import { assertSafeUrl, SsrfBlockedError } from "./explore-agent.service";
 
 interface TrackingPattern {
   name: string;
@@ -628,6 +629,8 @@ function classifyNetworkError(error: any): FetchFailError {
   return new FetchFailError("network_error", undefined, error?.message ?? "Network error");
 }
 
+const DETECT_TECH_MAX_REDIRECTS = 5;
+
 export async function detectTechnologies(url: string): Promise<TechResult> {
   try {
     new URL(url);
@@ -635,46 +638,86 @@ export async function detectTechnologies(url: string): Promise<TechResult> {
     throw new Error("URL inválida");
   }
 
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 15000);
-
+  let currentUrl = url;
+  let redirects = 0;
   let html: string;
-  try {
-    const response = await fetch(url, {
-      signal: controller.signal,
-      redirect: "follow",
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        Accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-      },
-    });
 
-    if (!response.ok) {
-      const status = response.status;
-      if (status === 429) {
-        throw new FetchFailError("rate_limited_by_site", status, `Site returned 429 Too Many Requests`);
+  // Manually walk redirects (instead of `redirect: "follow"`) so every hop is
+  // re-validated against the SSRF/DNS-rebinding guard before we connect to it.
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    let safeUrl: URL;
+    try {
+      safeUrl = await assertSafeUrl(currentUrl);
+    } catch (error: any) {
+      if (error instanceof SsrfBlockedError) {
+        throw new FetchFailError("blocked_by_site", undefined, error.message);
       }
-      if (status === 401 || status === 403 || status === 406 || status === 407) {
-        throw new FetchFailError("blocked_by_site", status, `Site blocked the request (HTTP ${status})`);
-      }
-      if (status >= 500) {
-        throw new FetchFailError("site_unavailable", status, `Site returned HTTP ${status}`);
-      }
-      throw new FetchFailError("network_error", status, `HTTP ${status} from target URL`);
+      throw classifyNetworkError(error);
     }
 
-    html = await response.text();
-  } catch (error: any) {
-    if (error instanceof FetchFailError) throw error;
-    if (error.name === "AbortError") {
-      throw new FetchFailError("timeout", undefined, "Request timed out after 15s");
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000);
+
+    try {
+      const response = await fetch(safeUrl.toString(), {
+        signal: controller.signal,
+        redirect: "manual",
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          Accept:
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+          "Accept-Language": "en-US,en;q=0.5",
+        },
+      });
+
+      if ([301, 302, 303, 307, 308].includes(response.status)) {
+        const location = response.headers.get("location");
+        if (!location) {
+          throw new FetchFailError(
+            "network_error",
+            response.status,
+            "Redirect response had no Location header"
+          );
+        }
+        redirects++;
+        if (redirects > DETECT_TECH_MAX_REDIRECTS) {
+          throw new FetchFailError(
+            "network_error",
+            undefined,
+            `Too many redirects (>${DETECT_TECH_MAX_REDIRECTS})`
+          );
+        }
+        currentUrl = new URL(location, safeUrl).toString();
+        continue;
+      }
+
+      if (!response.ok) {
+        const status = response.status;
+        if (status === 429) {
+          throw new FetchFailError("rate_limited_by_site", status, `Site returned 429 Too Many Requests`);
+        }
+        if (status === 401 || status === 403 || status === 406 || status === 407) {
+          throw new FetchFailError("blocked_by_site", status, `Site blocked the request (HTTP ${status})`);
+        }
+        if (status >= 500) {
+          throw new FetchFailError("site_unavailable", status, `Site returned HTTP ${status}`);
+        }
+        throw new FetchFailError("network_error", status, `HTTP ${status} from target URL`);
+      }
+
+      html = await response.text();
+      break;
+    } catch (error: any) {
+      if (error instanceof FetchFailError) throw error;
+      if (error.name === "AbortError") {
+        throw new FetchFailError("timeout", undefined, "Request timed out after 15s");
+      }
+      throw classifyNetworkError(error);
+    } finally {
+      clearTimeout(timeoutId);
     }
-    throw classifyNetworkError(error);
-  } finally {
-    clearTimeout(timeoutId);
   }
 
   // Detect CMS

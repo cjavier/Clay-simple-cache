@@ -6,10 +6,12 @@
   "scripts": {
     "dev": "npx prisma generate && npx prisma db push && nodemon src/index.ts",
     "build": "tsc",
-    "start": "npx prisma generate && npx prisma db push && node dist/index.js",
+    "start": "npx prisma generate && npx prisma migrate deploy && node dist/index.js",
     "prisma:generate": "prisma generate",
     "prisma:push": "prisma db push",
     "prisma:studio": "prisma studio",
+    "migrate:deploy": "prisma migrate deploy",
+    "migrate:status": "prisma migrate status",
     "test": "vitest run",
     "test:watch": "vitest"
   },
@@ -30,6 +32,7 @@
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^5.2.1",
+    "express-rate-limit": "^8.5.2",
     "libphonenumber-js": "^1.12.33",
     "prisma": "^5.22.0"
   },

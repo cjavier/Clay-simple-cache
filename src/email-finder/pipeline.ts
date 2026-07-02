@@ -18,7 +18,11 @@ import {
   prioritizePermutations,
   identifyPattern,
 } from "./permutator";
-import { getCachedVerification, cacheVerification } from "./cache";
+import {
+  getCachedVerification,
+  getCachedVerificationsBatch,
+  cacheVerification,
+} from "./cache";
 import { saveDomainPattern, getDomainPatterns } from "./pattern-learner";
 import { EmailListVerifyProvider } from "./providers/emaillistverify";
 import { DebounceProvider } from "./providers/debounce";
@@ -55,6 +59,9 @@ async function apiCascade(
   maxTier: number
 ): Promise<VerificationResult> {
   let totalCost = 0;
+  // "risky" is not conclusive: keep the first one as a fallback but keep
+  // walking the cascade in case a later tier returns something conclusive.
+  let riskyFallback: VerificationResult | null = null;
 
   for (let tierIdx = 0; tierIdx < TIERS.length; tierIdx++) {
     if (tierIdx + 1 > maxTier) break;
@@ -69,11 +76,16 @@ async function apiCascade(
         return { ...result, cost_usd: totalCost };
       }
 
-      // risky is not conclusive — continue to next provider
-      if (result.status === EmailStatus.risky) {
-        return { ...result, cost_usd: totalCost };
+      // risky is not conclusive — remember it as a fallback and continue
+      // to the next provider/tier instead of returning immediately.
+      if (result.status === EmailStatus.risky && !riskyFallback) {
+        riskyFallback = result;
       }
     }
+  }
+
+  if (riskyFallback) {
+    return { ...riskyFallback, cost_usd: totalCost };
   }
 
   return makeResult({ email, cost_usd: totalCost });
@@ -163,7 +175,7 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
 
   // Apply known domain patterns (from DB)
   const knownPatterns = await getDomainPatterns(domain);
-  permutations = prioritizePermutations(permutations, knownPatterns);
+  permutations = prioritizePermutations(permutations, knownPatterns, first, last);
 
   // ── 5b. SERP pattern discovery ──
   // Search Google for "@domain.com" to find real emails and identify the domain's pattern.
@@ -202,12 +214,13 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
         }
       }
 
-      permutations = prioritizePermutations(permutations, mergedPatterns);
+      permutations = prioritizePermutations(permutations, mergedPatterns, first, last);
 
-      // Save SERP-discovered patterns to DB for future lookups
-      for (const sp of serpPatterns) {
-        await saveDomainPattern(domain, sp.pattern);
-      }
+      // Save SERP-discovered patterns to DB for future lookups (parallel — each
+      // pattern is a distinct (domain, pattern) row, so writes are independent).
+      await Promise.all(
+        serpPatterns.map((sp) => saveDomainPattern(domain, sp.pattern))
+      );
     }
   }
 
@@ -221,9 +234,11 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
     direct_match: serpDirectMatch,
   };
 
-  // ── 6. Cache check ──
+  // ── 6. Cache check (single batch query, then pick the first hit in
+  // permutation priority order to preserve the previous serial semantics) ──
+  const cachedByEmail = await getCachedVerificationsBatch(permutations);
   for (const email of permutations) {
-    const cached = await getCachedVerification(email);
+    const cached = cachedByEmail.get(email);
     if (cached?.status === EmailStatus.valid) {
       const pattern = identifyPattern(email, first, last);
       return makeResult({

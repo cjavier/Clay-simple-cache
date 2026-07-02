@@ -26,6 +26,36 @@ export async function getCachedVerification(
   };
 }
 
+/**
+ * Batch variant of getCachedVerification. Looks up all given emails in a
+ * single query and returns only the non-expired ones, keyed by email —
+ * same expiration semantics as getCachedVerification (expires_at <= now
+ * is treated as a miss).
+ */
+export async function getCachedVerificationsBatch(
+  emails: string[]
+): Promise<Map<string, CachedVerification>> {
+  const result = new Map<string, CachedVerification>();
+  if (emails.length === 0) return result;
+
+  const cached = await prisma.verificationCache.findMany({
+    where: { email: { in: emails } },
+  });
+
+  const now = new Date();
+  for (const row of cached) {
+    if (row.expires_at <= now) continue;
+    result.set(row.email, {
+      email: row.email,
+      status: row.status as EmailStatus,
+      confidence: row.confidence,
+      method: row.method as VerificationMethod | null,
+    });
+  }
+
+  return result;
+}
+
 export async function cacheVerification(
   email: string,
   status: string,

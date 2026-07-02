@@ -18,10 +18,6 @@ model Profile {
   created_at    DateTime @default(now()) @db.Timestamptz(6)
   updated_at    DateTime @updatedAt @db.Timestamptz(6)
 
-  @@index([email])
-  @@index([linkedin_slug])
-  @@index([linkedin_url])
-  @@index([phone_e164])
   @@map("profiles")
 }
 
@@ -33,8 +29,6 @@ model Company {
   created_at    DateTime @default(now()) @db.Timestamptz(6)
   updated_at    DateTime @updatedAt @db.Timestamptz(6)
 
-  @@index([domain])
-  @@index([linkedin_slug])
   @@map("companies")
 }
 
@@ -50,7 +44,6 @@ model Client {
 
   dnc_entries DncEntry[]
 
-  @@index([handle])
   @@map("clients")
 }
 
@@ -85,7 +78,6 @@ model VerificationCache {
   verified_at DateTime @default(now()) @db.Timestamptz(6)
   expires_at  DateTime @db.Timestamptz(6)
 
-  @@index([email])
   @@map("verification_cache")
 }
 
@@ -98,7 +90,6 @@ model DomainPattern {
   last_confirmed DateTime @default(now()) @db.Timestamptz(6)
 
   @@unique([domain, pattern])
-  @@index([domain])
   @@map("domain_patterns")
 }
 
@@ -114,7 +105,6 @@ model DomainIntel {
   checked_at       DateTime @default(now()) @db.Timestamptz(6)
   expires_at       DateTime @db.Timestamptz(6)
 
-  @@index([domain])
   @@map("domain_intel")
 }
 

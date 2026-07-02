@@ -156,26 +156,64 @@ describe("identifyPattern", () => {
 describe("prioritizePermutations", () => {
   it("returns original order with no known patterns", () => {
     const perms = ["a@b.com", "c@b.com"];
-    expect(prioritizePermutations(perms, [])).toEqual(perms);
+    expect(prioritizePermutations(perms, [], "john", "doe")).toEqual(perms);
   });
 
   it("preserves all permutations (no emails lost)", () => {
     const perms = generatePermutations("john", "doe", "example.com");
-    const result = prioritizePermutations(perms, [
-      { pattern: "flast", confidence: 0.9, sample_count: 5 },
-    ]);
+    const result = prioritizePermutations(
+      perms,
+      [{ pattern: "flast", confidence: 0.9, sample_count: 5 }],
+      "john",
+      "doe"
+    );
     expect(result.length).toBe(perms.length);
     expect(new Set(result)).toEqual(new Set(perms));
   });
 
-  it("moves at least one email to prioritized section when pattern matches", () => {
+  it("moves the known-pattern email to the front even when it isn't first originally", () => {
+    // "first.last" (john.doe@) is always generated first by generatePermutations,
+    // so a test using it can't distinguish real prioritization from a no-op.
+    // Use "lastf" (doej@) instead, which sits well after the primary combination.
     const perms = generatePermutations("john", "doe", "example.com");
-    const result = prioritizePermutations(perms, [
-      { pattern: "first.last", confidence: 0.9, sample_count: 5 },
-    ]);
-    // With a known pattern, the first email should be one from the prioritized set
-    // (matchesPattern moves the first matching local part to front)
+    expect(perms[0]).not.toBe("doej@example.com"); // sanity: not already first
+
+    const result = prioritizePermutations(
+      perms,
+      [{ pattern: "lastf", confidence: 0.9, sample_count: 5 }],
+      "john",
+      "doe"
+    );
     expect(result.length).toBe(perms.length);
-    expect(result[0]).toBe("john.doe@example.com");
+    expect(result[0]).toBe("doej@example.com");
+  });
+
+  it("orders multiple known patterns by confidence/sample_count, highest first", () => {
+    const perms = generatePermutations("john", "doe", "example.com");
+    const result = prioritizePermutations(
+      perms,
+      [
+        { pattern: "lastf", confidence: 0.6, sample_count: 2 }, // doej@
+        { pattern: "first_last", confidence: 0.95, sample_count: 10 }, // john_doe@
+      ],
+      "john",
+      "doe"
+    );
+    expect(result[0]).toBe("john_doe@example.com");
+    expect(result[1]).toBe("doej@example.com");
+  });
+
+  it("does not match a pattern against a name it wasn't built from", () => {
+    // "flast" for jane/smith would be jsmith@, which must not incorrectly
+    // match/promote an unrelated permutation for john/doe.
+    const perms = generatePermutations("john", "doe", "example.com");
+    const result = prioritizePermutations(
+      perms,
+      [{ pattern: "flast", confidence: 0.9, sample_count: 5 }],
+      "jane",
+      "smith"
+    );
+    // No permutation matches jsmith@example.com, so order is unchanged.
+    expect(result).toEqual(perms);
   });
 });

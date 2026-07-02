@@ -1,4 +1,13 @@
 import { vi, describe, it, expect, beforeEach, afterEach } from "vitest";
+
+// Mock DNS resolution so detectTechnologies' SSRF/DNS-rebinding guard doesn't
+// depend on real network access. Defaults to a public IP for every host;
+// individual tests can override via mockLookup (e.g. to simulate ENOTFOUND).
+const mockLookup = vi.fn().mockResolvedValue([{ address: "93.184.216.34", family: 4 }]);
+vi.mock("dns/promises", () => ({
+  lookup: (...args: any[]) => mockLookup(...args),
+}));
+
 import { detectTechnologies } from "../../src/services/tech-detector.service";
 
 function makeMockFetch(html: string, status = 200) {
@@ -10,6 +19,11 @@ function makeMockFetch(html: string, status = 200) {
 }
 
 describe("detectTechnologies", () => {
+  beforeEach(() => {
+    mockLookup.mockReset();
+    mockLookup.mockResolvedValue([{ address: "93.184.216.34", family: 4 }]);
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
   });
@@ -229,13 +243,23 @@ describe("detectTechnologies", () => {
     });
 
     it("throws FetchFailError with reason=domain_not_found on ENOTFOUND", async () => {
-      const dnsError = Object.assign(new TypeError("fetch failed"), {
-        cause: Object.assign(new Error("getaddrinfo ENOTFOUND example.invalid"), { code: "ENOTFOUND" }),
+      const dnsError = Object.assign(new Error("getaddrinfo ENOTFOUND example.invalid"), {
+        code: "ENOTFOUND",
       });
-      vi.stubGlobal("fetch", vi.fn().mockRejectedValue(dnsError));
+      mockLookup.mockRejectedValue(dnsError);
+      vi.stubGlobal("fetch", vi.fn());
       await expect(detectTechnologies("https://example.invalid")).rejects.toMatchObject({
         name: "FetchFailError",
         reason: "domain_not_found",
+      });
+    });
+
+    it("throws FetchFailError with reason=blocked_by_site when the URL resolves to a private IP", async () => {
+      mockLookup.mockResolvedValue([{ address: "127.0.0.1", family: 4 }]);
+      vi.stubGlobal("fetch", vi.fn());
+      await expect(detectTechnologies("https://rebind.example.com")).rejects.toMatchObject({
+        name: "FetchFailError",
+        reason: "blocked_by_site",
       });
     });
 

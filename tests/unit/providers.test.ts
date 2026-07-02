@@ -98,6 +98,68 @@ describe("EmailListVerifyProvider", () => {
     expect(result.status).toBe(EmailStatus.invalid);
     expect(result.confidence).toBe(0.9);
   });
+
+  describe("credits-exhausted breaker", () => {
+    // creditsExhaustedUntil is module-level state, so each test needs a
+    // fresh module instance to avoid bleeding into other tests.
+    async function freshProvider() {
+      vi.resetModules();
+      const mod = await import("../../src/email-finder/providers/emaillistverify");
+      return new mod.EmailListVerifyProvider();
+    }
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("a generic 'error' response does NOT disable the provider for subsequent calls", async () => {
+      const p = await freshProvider();
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce({ text: () => Promise.resolve("error") })
+        .mockResolvedValueOnce({ text: () => Promise.resolve("ok") });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const first = await p.verify("test@example.com");
+      expect(first.status).toBe(EmailStatus.unknown);
+
+      // Provider must still be enabled: the second call should reach fetch
+      // again and reflect its (successful) response, not short-circuit.
+      const second = await p.verify("test2@example.com");
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(second.status).toBe(EmailStatus.valid);
+    });
+
+    it("'error_credit' disables the provider until the TTL elapses", async () => {
+      const p = await freshProvider();
+      const fetchMock = vi.fn().mockResolvedValue({
+        text: () => Promise.resolve("error_credit"),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const first = await p.verify("test@example.com");
+      expect(first.status).toBe(EmailStatus.unknown);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      // Immediately after: breaker is open, fetch must not be called again.
+      const second = await p.verify("test2@example.com");
+      expect(second.status).toBe(EmailStatus.unknown);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      // Advance past the TTL (10 minutes) — breaker should reset and the
+      // provider should hit the API again.
+      vi.advanceTimersByTime(10 * 60 * 1000 + 1);
+      fetchMock.mockResolvedValueOnce({ text: () => Promise.resolve("ok") });
+
+      const third = await p.verify("test3@example.com");
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(third.status).toBe(EmailStatus.valid);
+    });
+  });
 });
 
 describe("DebounceProvider", () => {
