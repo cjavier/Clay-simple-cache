@@ -357,6 +357,16 @@ function summarize(output: unknown): string {
   return str.length > 300 ? `${str.slice(0, 300)}…` : str;
 }
 
+// DeepSeek sometimes emits its internal tool-call markup (DSML) as plain text
+// when it wants a tool that is no longer offered. Strip it so the final
+// message never leaks raw markup to the client.
+function stripToolCallMarkup(content: string): string {
+  return content
+    .replace(/<｜｜DSML｜｜tool_calls>[\s\S]*?(<\/｜｜DSML｜｜tool_calls>|$)/g, "")
+    .replace(/<｜｜DSML｜｜[^>]*>/g, "")
+    .trim();
+}
+
 function addUsage(total: DeepSeekUsage, delta: DeepSeekUsage): void {
   total.prompt_tokens += delta.prompt_tokens || 0;
   total.completion_tokens += delta.completion_tokens || 0;
@@ -389,9 +399,24 @@ export async function runExploreAgent(
   const MAX_ITERATIONS = maxSteps + 2;
   let iterations = 0;
 
+  let finalNoticeSent = false;
+
   while (true) {
     iterations++;
     const forceFinal = stepCount >= maxSteps || iterations > MAX_ITERATIONS;
+
+    // Without tools in the request, the model may still try to emit a tool
+    // call as plain text (DeepSeek's DSML markup) unless told to stop.
+    if (forceFinal && !finalNoticeSent) {
+      finalNoticeSent = true;
+      messages.push({
+        role: "user",
+        content:
+          "You have reached the tool-use limit. Tools are no longer available — do NOT attempt " +
+          "to call any tool. Answer the original question now, using only the information " +
+          "gathered above. If the information is incomplete, say what you found and what is missing.",
+      });
+    }
 
     const result = await chatCompletion({
       messages,
@@ -407,7 +432,7 @@ export async function runExploreAgent(
 
     const toolCalls = assistantMessage.tool_calls;
     if (forceFinal || !toolCalls || toolCalls.length === 0) {
-      finalMessage = assistantMessage.content || "";
+      finalMessage = stripToolCallMarkup(assistantMessage.content || "");
       break;
     }
 
