@@ -5,7 +5,7 @@ import { DeepSeekApiError, DeepSeekConfigError } from "../services/deepseek.serv
 export const exploreController = {
   async explore(req: Request, res: Response): Promise<void> {
     try {
-      const { prompt, max_steps, model } = req.body || {};
+      const { prompt, max_steps, model, reasoning } = req.body || {};
 
       if (!prompt || typeof prompt !== "string" || !prompt.trim()) {
         res.status(400).json({ error: "prompt is required" });
@@ -22,7 +22,12 @@ export const exploreController = {
         return;
       }
 
-      const result = await runExploreAgent({ prompt, max_steps, model });
+      if (reasoning !== undefined && typeof reasoning !== "boolean") {
+        res.status(400).json({ error: "reasoning must be a boolean" });
+        return;
+      }
+
+      const result = await runExploreAgent({ prompt, max_steps, model, reasoning });
 
       res.json(result);
     } catch (error: any) {

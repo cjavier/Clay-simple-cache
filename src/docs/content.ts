@@ -591,6 +591,7 @@ Runs a tool-using agent loop: DeepSeek can call \`serp_search\` (Google via Serp
 |---|---|---|---|---|
 | \`prompt\` | string | **Yes** | — | The research question/task. |
 | \`max_steps\` | number | No | \`8\` | Max tool calls before forcing a final answer. Hard-capped at \`15\` regardless of the value sent. |
+| \`reasoning\` | boolean | No | \`true\` | DeepSeek thinking mode. When enabled, each step's \`reasoning\` carries the model's chain of thought. Set \`false\` for a slightly faster, non-reasoning run. |
 | \`model\` | string | No | \`"deepseek-v4-flash"\` | DeepSeek model name. |
 
 \`\`\`bash

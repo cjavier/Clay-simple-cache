@@ -340,6 +340,8 @@ export interface RunExploreAgentParams {
   prompt: string;
   max_steps?: number;
   model?: string;
+  /** Thinking/reasoning mode. Defaults to true (better research quality). */
+  reasoning?: boolean;
 }
 
 function safeParseJson(raw: string | undefined): any {
@@ -423,9 +425,9 @@ export async function runExploreAgent(
       model: params.model,
       tools: forceFinal ? undefined : TOOLS,
       tool_choice: forceFinal ? undefined : "auto",
-      // Reasoning mode noticeably improves research quality; v4 models
-      // support tool calls while thinking (verified against the live API).
-      thinking: { type: "enabled" },
+      // Reasoning mode improves research quality; v4 models support tool
+      // calls while thinking (verified against the live API).
+      thinking: { type: params.reasoning === false ? "disabled" : "enabled" },
     });
 
     addUsage(usage, result.usage);
