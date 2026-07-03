@@ -423,12 +423,19 @@ export async function runExploreAgent(
       model: params.model,
       tools: forceFinal ? undefined : TOOLS,
       tool_choice: forceFinal ? undefined : "auto",
+      // Reasoning mode noticeably improves research quality; v4 models
+      // support tool calls while thinking (verified against the live API).
+      thinking: { type: "enabled" },
     });
 
     addUsage(usage, result.usage);
 
     const assistantMessage = result.choice.message;
-    messages.push(assistantMessage);
+    // The API rejects reasoning_content when echoed back — keep it aside
+    // for step logging and push a sanitized copy into the history.
+    const reasoning = assistantMessage.reasoning_content;
+    const { reasoning_content: _omit, ...historyMessage } = assistantMessage;
+    messages.push(historyMessage as typeof assistantMessage);
 
     const toolCalls = assistantMessage.tool_calls;
     if (forceFinal || !toolCalls || toolCalls.length === 0) {
@@ -458,7 +465,9 @@ export async function runExploreAgent(
         tool: toolCall.function.name,
         input,
         output_summary: summarize(output),
-        reasoning: assistantMessage.content || undefined,
+        // Prefer the model's actual chain of thought (thinking mode) over
+        // any narration it wrote alongside the tool call.
+        reasoning: reasoning || assistantMessage.content || undefined,
       });
 
       messages.push({

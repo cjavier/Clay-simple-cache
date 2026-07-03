@@ -559,7 +559,7 @@ Single-shot prompt → copy generation, defaulted to a direct-response B2B outbo
 |---|---|---|---|---|
 | \`prompt\` | string | **Yes** | — | The user prompt/brief. |
 | \`system\` | string | No | Built-in B2B copywriter system prompt | Override the system prompt. |
-| \`model\` | string | No | \`"deepseek-chat"\` | DeepSeek model name. |
+| \`model\` | string | No | \`"deepseek-v4-flash"\` | DeepSeek model name. |
 | \`temperature\` | number | No | provider default | Passed through to DeepSeek. |
 | \`max_tokens\` | number | No | provider default | Passed through to DeepSeek. |
 
@@ -573,7 +573,7 @@ curl -X POST {{BASE_URL}}/copy \\
 \`\`\`json
 {
   "response": "Hi {{first_name}} — noticed {{company}} just closed its Series B...",
-  "model": "deepseek-chat",
+  "model": "deepseek-v4-flash",
   "usage": { "prompt_tokens": 120, "completion_tokens": 48, "total_tokens": 168 },
   "duration_ms": 1450
 }
@@ -591,7 +591,7 @@ Runs a tool-using agent loop: DeepSeek can call \`serp_search\` (Google via Serp
 |---|---|---|---|---|
 | \`prompt\` | string | **Yes** | — | The research question/task. |
 | \`max_steps\` | number | No | \`8\` | Max tool calls before forcing a final answer. Hard-capped at \`15\` regardless of the value sent. |
-| \`model\` | string | No | \`"deepseek-chat"\` | DeepSeek model name. |
+| \`model\` | string | No | \`"deepseek-v4-flash"\` | DeepSeek model name. |
 
 \`\`\`bash
 curl -X POST {{BASE_URL}}/explore \\

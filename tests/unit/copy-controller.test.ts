@@ -73,7 +73,7 @@ describe("copyController.generate", () => {
 
     expect(res.statusCode).toBe(200);
     expect(res.body.response).toBe("Hi {{firstName}}, quick question...");
-    expect(res.body.model).toBe("deepseek-chat");
+    expect(res.body.model).toBe("deepseek-v4-flash");
     expect(res.body.usage).toEqual({ prompt_tokens: 12, completion_tokens: 8, total_tokens: 20 });
     expect(typeof res.body.duration_ms).toBe("number");
   });

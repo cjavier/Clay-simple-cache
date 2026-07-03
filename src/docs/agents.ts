@@ -26,7 +26,7 @@ GET  /clients?handle? -> {result,clients:[...]} | {result:1,client} | 404 {error
 POST /dnc {handle,list_type:"individual"|"domain",entries[]|entry|email|domain} -> {status,handle,list_type,added,skipped_duplicates,invalid[],entries[]}
 POST /dnc/check {handle,email} -> {handle,email,do_not_contact,matched_by:"email"|"domain"|null}
 GET  /dnc?handle,list_type? -> {handle,result,entries[]}
-POST /copy {prompt,system?,model?="deepseek-chat",temperature?,max_tokens?} -> {response,model,usage,duration_ms} | 503/502 {error}
+POST /copy {prompt,system?,model?="deepseek-v4-flash",temperature?,max_tokens?} -> {response,model,usage,duration_ms} | 503/502 {error}
 POST /explore {prompt,max_steps?=8(cap 15),model?} -> {message,steps:[{step,tool,input,output_summary,reasoning?}],total_steps,usage,duration_ms} | 503/502 {error}
 GET  /health -> "OK" (no auth)`;
 

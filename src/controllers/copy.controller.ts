@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import {
   chatCompletion,
+  DEFAULT_MODEL,
   DeepSeekApiError,
   DeepSeekConfigError,
   DeepSeekMessage,
@@ -22,7 +23,7 @@ export const copyController = {
         return;
       }
 
-      const usedModel = typeof model === "string" && model.trim() ? model.trim() : "deepseek-chat";
+      const usedModel = typeof model === "string" && model.trim() ? model.trim() : DEFAULT_MODEL;
 
       const messages: DeepSeekMessage[] = [
         {

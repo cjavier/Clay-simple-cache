@@ -64,7 +64,7 @@ describe("deepseek.service chatCompletion", () => {
     expect(url).toBe("https://api.deepseek.com/chat/completions");
     expect(options.headers.Authorization).toBe("Bearer test-deepseek-key");
     const parsedBody = JSON.parse(options.body);
-    expect(parsedBody.model).toBe("deepseek-chat");
+    expect(parsedBody.model).toBe("deepseek-v4-flash");
   });
 
   it("passes through a custom model and tool definitions", async () => {

@@ -21,6 +21,7 @@ import { detectTechnologies, FetchFailError } from "../services/tech-detector.se
 import { findLinkedInForDomain } from "../services/linkedin-finder.service";
 import {
   chatCompletion,
+  DEFAULT_MODEL,
   DeepSeekApiError,
   DeepSeekConfigError,
   DeepSeekMessage,
@@ -948,13 +949,13 @@ export function buildMcpServer(): McpServer {
       try {
         const result = await chatCompletion({
           messages,
-          model: "deepseek-chat",
+          model: DEFAULT_MODEL,
           temperature,
           max_tokens,
         });
         return ok({
           response: result.choice.message.content ?? "",
-          model: "deepseek-chat",
+          model: DEFAULT_MODEL,
           usage: result.usage,
         });
       } catch (error: any) {

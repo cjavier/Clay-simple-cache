@@ -4,7 +4,9 @@
  */
 
 const DEEPSEEK_BASE_URL = "https://api.deepseek.com";
-const DEFAULT_MODEL = "deepseek-chat";
+// "deepseek-chat"/"deepseek-reasoner" aliases are deprecated 2026-07-24;
+// deepseek-v4-flash is the same model the aliases resolved to.
+export const DEFAULT_MODEL = process.env.DEEPSEEK_MODEL || "deepseek-v4-flash";
 const REQUEST_TIMEOUT_MS = 120_000;
 
 export type DeepSeekRole = "system" | "user" | "assistant" | "tool";
@@ -21,9 +23,16 @@ export interface DeepSeekToolCall {
 export interface DeepSeekMessage {
   role: DeepSeekRole;
   content: string | null;
+  /** Chain-of-thought text returned when thinking mode is enabled. Never send it back to the API. */
+  reasoning_content?: string;
   tool_calls?: DeepSeekToolCall[];
   tool_call_id?: string;
   name?: string;
+}
+
+export interface DeepSeekThinking {
+  type: "enabled" | "disabled";
+  reasoning_effort?: "high" | "max";
 }
 
 export interface DeepSeekTool {
@@ -64,6 +73,7 @@ export interface ChatCompletionParams {
   max_tokens?: number;
   tools?: DeepSeekTool[];
   tool_choice?: DeepSeekToolChoice;
+  thinking?: DeepSeekThinking;
 }
 
 /** Thrown when DEEPSEEK_API_KEY is missing from the environment. */
@@ -100,6 +110,7 @@ export async function chatCompletion(
   if (params.max_tokens !== undefined) body.max_tokens = params.max_tokens;
   if (params.tools) body.tools = params.tools;
   if (params.tool_choice) body.tool_choice = params.tool_choice;
+  if (params.thinking) body.thinking = params.thinking;
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
