@@ -33,6 +33,8 @@ Full endpoint reference (request/response shapes, error codes, curl examples, an
 - **AI (DeepSeek)**:
   - `POST /copy` — single-shot prompt → outbound copy generation.
   - `POST /explore` — a tool-using research agent (Google search + page fetch, SSRF-guarded) that answers open-ended questions with sourced reasoning steps.
+  - Both return `usage` (prompt/completion/cached tokens) and `usage.cost_usd` (computed from DeepSeek's per-model pricing).
+  - Both accept an optional `response_schema` — a JSON shape describing the desired output — to get back parsed structured JSON (e.g. `{description, top_problems: [...]}`) instead of a single free-text string.
 - **Data Merging**: Merges JSON data safely, never destructively overwrites.
 - **ORM**: Builds on **Prisma** + **Supabase** (PostgreSQL).
 
@@ -130,8 +132,8 @@ See the full, always-current API reference at `GET /docs/api` (e.g. `http://loca
   - `GET /dnc`: List a client's DNC entries (optional `?list_type=`).
 
 - **AI (DeepSeek)**
-  - `POST /copy`: Generate outbound copy from a prompt. Returns `503` if `DEEPSEEK_API_KEY` is unset, `502` on upstream failure.
-  - `POST /explore`: Run a tool-using research agent (`serp_search` + `fetch_page`, up to `max_steps` tool calls, default 8, hard cap 15). Returns the final message plus a step-by-step trace.
+  - `POST /copy`: Generate outbound copy from a prompt. Returns `503` if `DEEPSEEK_API_KEY` is unset, `502` on upstream failure. Optional `response_schema` returns `response` as parsed JSON matching that shape.
+  - `POST /explore`: Run a tool-using research agent (`serp_search` + `fetch_page`, up to `max_steps` tool calls, default 8, hard cap 15). Returns the final message plus a step-by-step trace. Optional `response_schema` returns `message` as parsed JSON matching that shape.
 
 - **Misc**
   - `GET /health`: Liveness check (no auth), returns `OK`.

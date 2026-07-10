@@ -26,8 +26,8 @@ GET  /clients?handle? -> {result,clients:[...]} | {result:1,client} | 404 {error
 POST /dnc {handle,list_type:"individual"|"domain",entries[]|entry|email|domain} -> {status,handle,list_type,added,skipped_duplicates,invalid[],entries[]}
 POST /dnc/check {handle,email} -> {handle,email,do_not_contact,matched_by:"email"|"domain"|null}
 GET  /dnc?handle,list_type? -> {handle,result,entries[]}
-POST /copy {prompt,system?,model?="deepseek-v4-flash",temperature?,max_tokens?} -> {response,model,usage,duration_ms} | 503/502 {error}
-POST /explore {prompt,max_steps?=8(cap 15),model?,reasoning?=true} -> {message,steps:[{step,tool,input,output_summary,reasoning?}],total_steps,usage,duration_ms} | 503/502 {error}
+POST /copy {prompt,system?,model?="deepseek-v4-flash",temperature?,max_tokens?,response_schema?} -> {response,model,usage:{prompt_tokens,completion_tokens,total_tokens,prompt_cache_hit_tokens,prompt_cache_miss_tokens,cost_usd},duration_ms,warning?} | 503/502/400 {error}
+POST /explore {prompt,max_steps?=8(cap 15),model?,reasoning?=true,response_schema?} -> {message,steps:[{step,tool,input,output_summary,reasoning?}],total_steps,usage:{prompt_tokens,completion_tokens,total_tokens,prompt_cache_hit_tokens,prompt_cache_miss_tokens,cost_usd},duration_ms} | 503/502/400 {error}
 GET  /health -> "OK" (no auth)`;
 
 /** One line per MCP tool: name, input shape, one-line behavior. */
@@ -44,8 +44,8 @@ create_client {name,handle?} -> registers a new client; handle is derived from n
 dnc_check {client,email} -> read-only Do Not Contact check. Call this before contacting anyone in a client's campaign; treat a true result as a hard stop.
 dnc_add {client,list_type:"individual"|"domain",entries[]} -> adds emails or domains to a client's Do Not Contact list.
 dnc_list {client,list_type?} -> read-only listing of a client's Do Not Contact entries.
-generate_copy {prompt,system?,temperature?,max_tokens?} -> generates B2B outbound copy via DeepSeek. Requires DEEPSEEK_API_KEY server-side.
-explore {prompt,max_steps?} -> runs a web-research agent (Google SERP + page fetch) and returns its final answer plus a step trace. Requires DEEPSEEK_API_KEY server-side.
+generate_copy {prompt,system?,temperature?,max_tokens?,response_schema?} -> generates B2B outbound copy via DeepSeek; returns token usage + cost_usd; when response_schema is set, response is a parsed JSON object matching it instead of a string. Requires DEEPSEEK_API_KEY server-side.
+explore {prompt,max_steps?,response_schema?} -> runs a web-research agent (Google SERP + page fetch) and returns its final answer plus a step trace and token usage + cost_usd; when response_schema is set, message is a parsed JSON object matching it. Requires DEEPSEEK_API_KEY server-side.
 get_stats {} -> read-only aggregate usage/cost metrics for the email finder.`;
 
 /** Operating rules shared by REST and MCP consumers. */

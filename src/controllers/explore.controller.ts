@@ -2,10 +2,14 @@ import { Request, Response } from "express";
 import { runExploreAgent } from "../services/explore-agent.service";
 import { DeepSeekApiError, DeepSeekConfigError } from "../services/deepseek.service";
 
+function isPlainObject(value: unknown): boolean {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 export const exploreController = {
   async explore(req: Request, res: Response): Promise<void> {
     try {
-      const { prompt, max_steps, model, reasoning } = req.body || {};
+      const { prompt, max_steps, model, reasoning, response_schema } = req.body || {};
 
       if (!prompt || typeof prompt !== "string" || !prompt.trim()) {
         res.status(400).json({ error: "prompt is required" });
@@ -27,7 +31,12 @@ export const exploreController = {
         return;
       }
 
-      const result = await runExploreAgent({ prompt, max_steps, model, reasoning });
+      if (response_schema !== undefined && !isPlainObject(response_schema)) {
+        res.status(400).json({ error: "response_schema must be a JSON object" });
+        return;
+      }
+
+      const result = await runExploreAgent({ prompt, max_steps, model, reasoning, response_schema });
 
       res.json(result);
     } catch (error: any) {

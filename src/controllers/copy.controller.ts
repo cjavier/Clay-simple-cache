@@ -1,49 +1,40 @@
 import { Request, Response } from "express";
-import {
-  chatCompletion,
-  DEFAULT_MODEL,
-  DeepSeekApiError,
-  DeepSeekConfigError,
-  DeepSeekMessage,
-} from "../services/deepseek.service";
+import { generateCopy } from "../services/copy.service";
+import { DeepSeekApiError, DeepSeekConfigError } from "../services/deepseek.service";
 
-export const DEFAULT_SYSTEM_PROMPT =
-  "You are a direct-response B2B copywriter for an outbound sales/GTM agency. " +
-  "Write clear, concrete, persuasive outreach copy (emails, LinkedIn messages, ad copy, etc). " +
-  "Respond only with the requested copy — no preambles, no meta-commentary, no explanations.";
+export { DEFAULT_SYSTEM_PROMPT } from "../services/copy.service";
+
+function isPlainObject(value: unknown): boolean {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 
 export const copyController = {
   async generate(req: Request, res: Response): Promise<void> {
     const start = Date.now();
     try {
-      const { prompt, system, model, temperature, max_tokens } = req.body || {};
+      const { prompt, system, model, temperature, max_tokens, response_schema } = req.body || {};
 
       if (!prompt || typeof prompt !== "string" || !prompt.trim()) {
         res.status(400).json({ error: "prompt is required" });
         return;
       }
 
-      const usedModel = typeof model === "string" && model.trim() ? model.trim() : DEFAULT_MODEL;
+      if (response_schema !== undefined && !isPlainObject(response_schema)) {
+        res.status(400).json({ error: "response_schema must be a JSON object" });
+        return;
+      }
 
-      const messages: DeepSeekMessage[] = [
-        {
-          role: "system",
-          content: typeof system === "string" && system.trim() ? system : DEFAULT_SYSTEM_PROMPT,
-        },
-        { role: "user", content: prompt },
-      ];
-
-      const result = await chatCompletion({
-        messages,
-        model: usedModel,
+      const result = await generateCopy({
+        prompt,
+        system: typeof system === "string" ? system : undefined,
+        model: typeof model === "string" ? model : undefined,
         temperature: typeof temperature === "number" ? temperature : undefined,
         max_tokens: typeof max_tokens === "number" ? max_tokens : undefined,
+        response_schema,
       });
 
       res.json({
-        response: result.choice.message.content ?? "",
-        model: usedModel,
-        usage: result.usage,
+        ...result,
         duration_ms: Date.now() - start,
       });
     } catch (error: any) {

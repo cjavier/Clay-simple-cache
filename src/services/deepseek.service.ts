@@ -50,10 +50,56 @@ export type DeepSeekToolChoice =
   | "required"
   | { type: "function"; function: { name: string } };
 
+export interface DeepSeekResponseFormat {
+  /** `json_object` guarantees syntactically valid JSON; it does not enforce a specific shape. */
+  type: "text" | "json_object";
+}
+
 export interface DeepSeekUsage {
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
+  /** Prompt tokens billed at the (cheaper) context-cache-hit rate. */
+  prompt_cache_hit_tokens: number;
+  /** Prompt tokens billed at the standard cache-miss rate. */
+  prompt_cache_miss_tokens: number;
+  /** Computed from `DEEPSEEK_PRICING`; `null` if `model` isn't in that table. */
+  cost_usd: number | null;
+}
+
+export interface DeepSeekModelPricing {
+  /** USD per 1,000,000 input tokens that hit the context cache. */
+  cache_hit_per_million: number;
+  /** USD per 1,000,000 input tokens that miss the context cache. */
+  cache_miss_per_million: number;
+  /** USD per 1,000,000 output (completion) tokens. */
+  output_per_million: number;
+}
+
+// Source: https://api-docs.deepseek.com/quick_start/pricing — re-check after
+// pricing changes. deepseek-chat/deepseek-reasoner (deprecated 2026-07-24) are
+// the non-thinking/thinking aliases of deepseek-v4-flash and billed the same.
+export const DEEPSEEK_PRICING: Record<string, DeepSeekModelPricing> = {
+  "deepseek-v4-flash": { cache_hit_per_million: 0.0028, cache_miss_per_million: 0.14, output_per_million: 0.28 },
+  "deepseek-v4-pro": { cache_hit_per_million: 0.003625, cache_miss_per_million: 0.435, output_per_million: 0.87 },
+  "deepseek-chat": { cache_hit_per_million: 0.0028, cache_miss_per_million: 0.14, output_per_million: 0.28 },
+  "deepseek-reasoner": { cache_hit_per_million: 0.0028, cache_miss_per_million: 0.14, output_per_million: 0.28 },
+};
+
+/** Returns null when `model` has no entry in `DEEPSEEK_PRICING`. */
+export function calculateCostUsd(
+  model: string,
+  cacheHitTokens: number,
+  cacheMissTokens: number,
+  completionTokens: number
+): number | null {
+  const pricing = DEEPSEEK_PRICING[model];
+  if (!pricing) return null;
+  const cost =
+    (cacheHitTokens / 1_000_000) * pricing.cache_hit_per_million +
+    (cacheMissTokens / 1_000_000) * pricing.cache_miss_per_million +
+    (completionTokens / 1_000_000) * pricing.output_per_million;
+  return Math.round(cost * 1e8) / 1e8;
 }
 
 export interface DeepSeekChatChoice {
@@ -74,6 +120,7 @@ export interface ChatCompletionParams {
   tools?: DeepSeekTool[];
   tool_choice?: DeepSeekToolChoice;
   thinking?: DeepSeekThinking;
+  response_format?: DeepSeekResponseFormat;
 }
 
 /** Thrown when DEEPSEEK_API_KEY is missing from the environment. */
@@ -111,6 +158,7 @@ export async function chatCompletion(
   if (params.tools) body.tools = params.tools;
   if (params.tool_choice) body.tool_choice = params.tool_choice;
   if (params.thinking) body.thinking = params.thinking;
+  if (params.response_format) body.response_format = params.response_format;
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -167,15 +215,25 @@ export async function chatCompletion(
     throw new DeepSeekApiError(502, "DeepSeek response contained no choices");
   }
 
+  const promptTokens = data?.usage?.prompt_tokens ?? 0;
+  const completionTokens = data?.usage?.completion_tokens ?? 0;
+  const promptCacheHitTokens = data?.usage?.prompt_cache_hit_tokens ?? 0;
+  // Fall back to treating all prompt tokens as cache-miss (the conservative,
+  // more expensive assumption) if DeepSeek doesn't return the cache breakdown.
+  const promptCacheMissTokens = data?.usage?.prompt_cache_miss_tokens ?? promptTokens - promptCacheHitTokens;
+
   return {
     choice: {
       message: rawChoice.message,
       finish_reason: rawChoice.finish_reason,
     },
     usage: {
-      prompt_tokens: data?.usage?.prompt_tokens ?? 0,
-      completion_tokens: data?.usage?.completion_tokens ?? 0,
+      prompt_tokens: promptTokens,
+      completion_tokens: completionTokens,
       total_tokens: data?.usage?.total_tokens ?? 0,
+      prompt_cache_hit_tokens: promptCacheHitTokens,
+      prompt_cache_miss_tokens: promptCacheMissTokens,
+      cost_usd: calculateCostUsd(model, promptCacheHitTokens, promptCacheMissTokens, completionTokens),
     },
   };
 }

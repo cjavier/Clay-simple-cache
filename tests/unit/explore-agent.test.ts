@@ -221,7 +221,10 @@ describe("runExploreAgent loop", () => {
       reasoning: "Let me search for that.",
     });
     expect(result.steps[0].output_summary).toContain("Clay Cache");
-    expect(result.usage).toEqual({ prompt_tokens: 60, completion_tokens: 25, total_tokens: 85 });
+    expect(result.usage.prompt_tokens).toBe(60);
+    expect(result.usage.completion_tokens).toBe(25);
+    expect(result.usage.total_tokens).toBe(85);
+    expect(typeof result.usage.cost_usd).toBe("number");
   });
 
   it("forces a final answer without tools once max_steps is reached", async () => {
@@ -316,5 +319,50 @@ describe("runExploreAgent loop", () => {
 
     const result = await runExploreAgent({ prompt: "never stop", max_steps: 999 });
     expect(result.total_steps).toBeLessThanOrEqual(15 + 2); // hard cap + small slack for forced-final round
+  });
+
+  it("reformats the final answer as JSON and adds one extra call's usage when response_schema is set", async () => {
+    let deepseekCalls = 0;
+    const fetchMock = vi.fn().mockImplementation((url: string, options: any) => {
+      deepseekCalls++;
+      const parsedBody = JSON.parse(options.body);
+      if (deepseekCalls === 1) {
+        expect(parsedBody.response_format).toBeUndefined();
+        return Promise.resolve(
+          deepseekResponse({
+            choices: [{ message: { role: "assistant", content: "Clay Cache is a GTM enrichment API." }, finish_reason: "stop" }],
+            usage: { prompt_tokens: 40, completion_tokens: 15, total_tokens: 55 },
+          })
+        );
+      }
+      // The follow-up reformat call must request JSON output and skip tools/thinking.
+      expect(parsedBody.response_format).toEqual({ type: "json_object" });
+      expect(parsedBody.tools).toBeUndefined();
+      expect(parsedBody.thinking).toEqual({ type: "disabled" });
+      return Promise.resolve(
+        deepseekResponse({
+          choices: [
+            {
+              message: { role: "assistant", content: JSON.stringify({ answer: "Clay Cache is a GTM enrichment API." }) },
+              finish_reason: "stop",
+            },
+          ],
+          usage: { prompt_tokens: 60, completion_tokens: 10, total_tokens: 70 },
+        })
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await runExploreAgent({
+      prompt: "What is Clay Cache?",
+      response_schema: { answer: "string" },
+    });
+
+    expect(deepseekCalls).toBe(2);
+    expect(result.message).toEqual({ answer: "Clay Cache is a GTM enrichment API." });
+    // Usage from both the research call and the reformat call is accumulated.
+    expect(result.usage.prompt_tokens).toBe(100);
+    expect(result.usage.completion_tokens).toBe(25);
+    expect(result.usage.total_tokens).toBe(125);
   });
 });

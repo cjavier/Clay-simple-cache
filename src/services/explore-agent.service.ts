@@ -329,7 +329,7 @@ export interface ExploreStep {
 }
 
 export interface ExploreAgentResult {
-  message: string;
+  message: string | Record<string, unknown>;
   steps: ExploreStep[];
   total_steps: number;
   duration_ms: number;
@@ -342,6 +342,13 @@ export interface RunExploreAgentParams {
   model?: string;
   /** Thinking/reasoning mode. Defaults to true (better research quality). */
   reasoning?: boolean;
+  /**
+   * A JSON structure/shape describing the desired final answer. When set, `message`
+   * is a parsed JSON object matching it instead of a plain string — the agent still
+   * researches normally, then reformats its final answer with one extra (non-tool)
+   * model call. Best-effort: valid JSON syntax is guaranteed, shape conformance isn't.
+   */
+  response_schema?: unknown;
 }
 
 function safeParseJson(raw: string | undefined): any {
@@ -373,6 +380,18 @@ function addUsage(total: DeepSeekUsage, delta: DeepSeekUsage): void {
   total.prompt_tokens += delta.prompt_tokens || 0;
   total.completion_tokens += delta.completion_tokens || 0;
   total.total_tokens += delta.total_tokens || 0;
+  total.prompt_cache_hit_tokens += delta.prompt_cache_hit_tokens || 0;
+  total.prompt_cache_miss_tokens += delta.prompt_cache_miss_tokens || 0;
+  // Null means "cost unknown for at least one call" (e.g. a custom, unpriced model) — stays null once set.
+  total.cost_usd = total.cost_usd === null || delta.cost_usd === null ? null : total.cost_usd + delta.cost_usd;
+}
+
+function parseStructuredResponse(raw: string | null | undefined): Record<string, unknown> {
+  try {
+    return JSON.parse(raw || "{}");
+  } catch {
+    return { error: "DeepSeek did not return valid JSON for the requested structure.", raw: raw ?? "" };
+  }
 }
 
 export async function runExploreAgent(
@@ -392,7 +411,14 @@ export async function runExploreAgent(
   ];
 
   const steps: ExploreStep[] = [];
-  const usage: DeepSeekUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+  const usage: DeepSeekUsage = {
+    prompt_tokens: 0,
+    completion_tokens: 0,
+    total_tokens: 0,
+    prompt_cache_hit_tokens: 0,
+    prompt_cache_miss_tokens: 0,
+    cost_usd: 0,
+  };
 
   let stepCount = 0;
   let finalMessage = "";
@@ -480,8 +506,29 @@ export async function runExploreAgent(
     }
   }
 
+  let message: string | Record<string, unknown> = finalMessage;
+  if (params.response_schema !== undefined) {
+    messages.push({
+      role: "user",
+      content:
+        "Reformat your previous answer as a single JSON object matching this structure (field " +
+        "names/shape as a guide, not literal values):\n" +
+        JSON.stringify(params.response_schema) +
+        "\nRespond with ONLY the JSON object — no explanations, no markdown code fences.",
+    });
+
+    const formatResult = await chatCompletion({
+      messages,
+      model: params.model,
+      response_format: { type: "json_object" },
+      thinking: { type: "disabled" },
+    });
+    addUsage(usage, formatResult.usage);
+    message = parseStructuredResponse(formatResult.choice.message.content);
+  }
+
   return {
-    message: finalMessage,
+    message,
     steps,
     total_steps: steps.length,
     duration_ms: Date.now() - start,

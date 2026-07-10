@@ -19,15 +19,9 @@ import { clientService } from "../services/client.service";
 import { findEmail, verifySingleEmail } from "../email-finder";
 import { detectTechnologies, FetchFailError } from "../services/tech-detector.service";
 import { findLinkedInForDomain } from "../services/linkedin-finder.service";
-import {
-  chatCompletion,
-  DEFAULT_MODEL,
-  DeepSeekApiError,
-  DeepSeekConfigError,
-  DeepSeekMessage,
-} from "../services/deepseek.service";
+import { DeepSeekApiError, DeepSeekConfigError } from "../services/deepseek.service";
 import { runExploreAgent } from "../services/explore-agent.service";
-import { DEFAULT_SYSTEM_PROMPT } from "../controllers/copy.controller";
+import { generateCopy } from "../services/copy.service";
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -930,6 +924,14 @@ export function buildMcpServer(): McpServer {
         system: z.string().optional().describe("Override the default B2B copywriter system prompt."),
         temperature: z.number().optional().describe("Sampling temperature, passed through to DeepSeek."),
         max_tokens: z.number().optional().describe("Max output tokens, passed through to DeepSeek."),
+        response_schema: z
+          .record(z.string(), z.unknown())
+          .optional()
+          .describe(
+            "A JSON structure/shape describing the desired output (e.g. {\"description\": \"string\", " +
+              "\"top_problems\": [\"string\",\"string\",\"string\"]}). When set, `response` is returned as a " +
+              "parsed JSON object matching it instead of a plain string (best-effort, not schema-validated)."
+          ),
       },
       annotations: {
         title: "Generate Copy",
@@ -938,26 +940,12 @@ export function buildMcpServer(): McpServer {
         openWorldHint: true,
       },
     },
-    safe(async ({ prompt, system, temperature, max_tokens }) => {
+    safe(async ({ prompt, system, temperature, max_tokens, response_schema }) => {
       if (!prompt || !prompt.trim()) return fail("prompt is required");
 
-      const messages: DeepSeekMessage[] = [
-        { role: "system", content: system && system.trim() ? system : DEFAULT_SYSTEM_PROMPT },
-        { role: "user", content: prompt },
-      ];
-
       try {
-        const result = await chatCompletion({
-          messages,
-          model: DEFAULT_MODEL,
-          temperature,
-          max_tokens,
-        });
-        return ok({
-          response: result.choice.message.content ?? "",
-          model: DEFAULT_MODEL,
-          usage: result.usage,
-        });
+        const result = await generateCopy({ prompt, system, temperature, max_tokens, response_schema });
+        return ok(result);
       } catch (error: any) {
         if (error instanceof DeepSeekConfigError) {
           return fail(`DeepSeek is not configured: ${error.message}`);
@@ -987,6 +975,13 @@ export function buildMcpServer(): McpServer {
           .positive()
           .optional()
           .describe("Max tool calls before forcing a final answer. Default 8, hard-capped at 15."),
+        response_schema: z
+          .record(z.string(), z.unknown())
+          .optional()
+          .describe(
+            "A JSON structure/shape describing the desired final answer. When set, `message` is returned " +
+              "as a parsed JSON object matching it instead of a plain string (best-effort, not schema-validated)."
+          ),
       },
       annotations: {
         title: "Explore",
@@ -995,14 +990,14 @@ export function buildMcpServer(): McpServer {
         openWorldHint: true,
       },
     },
-    safe(async ({ prompt, max_steps }) => {
+    safe(async ({ prompt, max_steps, response_schema }) => {
       if (!prompt || !prompt.trim()) return fail("prompt is required");
       if (max_steps !== undefined && (!Number.isFinite(max_steps) || max_steps <= 0)) {
         return fail("max_steps must be a positive number");
       }
 
       try {
-        const result = await runExploreAgent({ prompt, max_steps });
+        const result = await runExploreAgent({ prompt, max_steps, response_schema });
         return ok(result);
       } catch (error: any) {
         if (error instanceof DeepSeekConfigError) {

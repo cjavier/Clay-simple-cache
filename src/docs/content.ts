@@ -562,6 +562,7 @@ Single-shot prompt → copy generation, defaulted to a direct-response B2B outbo
 | \`model\` | string | No | \`"deepseek-v4-flash"\` | DeepSeek model name. |
 | \`temperature\` | number | No | provider default | Passed through to DeepSeek. |
 | \`max_tokens\` | number | No | provider default | Passed through to DeepSeek. |
+| \`response_schema\` | object | No | — | A JSON structure/shape describing the desired output (a literal example object works, e.g. \`{"description": "string", "top_problems": ["string","string","string"]}\`). When set, \`response\` is the **parsed JSON object** matching it instead of a plain string. Best-effort: DeepSeek guarantees valid JSON syntax, not schema conformance — if it returns malformed JSON, \`response\` falls back to the raw string and a \`warning\` field is added. |
 
 \`\`\`bash
 curl -X POST {{BASE_URL}}/copy \\
@@ -574,12 +575,41 @@ curl -X POST {{BASE_URL}}/copy \\
 {
   "response": "Hi {{first_name}} — noticed {{company}} just closed its Series B...",
   "model": "deepseek-v4-flash",
-  "usage": { "prompt_tokens": 120, "completion_tokens": 48, "total_tokens": 168 },
+  "usage": {
+    "prompt_tokens": 120,
+    "completion_tokens": 48,
+    "total_tokens": 168,
+    "prompt_cache_hit_tokens": 0,
+    "prompt_cache_miss_tokens": 120,
+    "cost_usd": 0.00003024
+  },
   "duration_ms": 1450
 }
 \`\`\`
+\`usage.cost_usd\` is computed from DeepSeek's per-model token pricing (cache-hit/cache-miss input rates + output rate); it's \`null\` if a custom \`model\` isn't in the known pricing table.
 
-**Errors**: \`400\` \`{ "error": "prompt is required" }\`; \`503\` \`{ "error": "DEEPSEEK_API_KEY is not configured" }\`; \`502\` \`{ "error": "DeepSeek API error (...)" }\` on upstream failure; \`500\` unexpected.
+**Structured output example**:
+\`\`\`bash
+curl -X POST {{BASE_URL}}/copy \\
+  -H "Authorization: Bearer your_secret_key" -H "Content-Type: application/json" \\
+  -d '{
+    "prompt": "Describe empresa.com'\\''s customer service and their top 3 problems.",
+    "response_schema": { "description": "string", "top_problems": ["string", "string", "string"] }
+  }'
+\`\`\`
+\`\`\`json
+{
+  "response": {
+    "description": "empresa.com runs a small support team handling tickets via email and chat.",
+    "top_problems": ["Slow first response time", "No self-service knowledge base", "Inconsistent escalation process"]
+  },
+  "model": "deepseek-v4-flash",
+  "usage": { "...": "..." },
+  "duration_ms": 1800
+}
+\`\`\`
+
+**Errors**: \`400\` \`{ "error": "prompt is required" }\`; \`400\` \`{ "error": "response_schema must be a JSON object" }\`; \`503\` \`{ "error": "DEEPSEEK_API_KEY is not configured" }\`; \`502\` \`{ "error": "DeepSeek API error (...)" }\` on upstream failure; \`500\` unexpected.
 
 <a id="explore-post"></a>
 ### \`POST /explore\` — Research Agent
@@ -593,6 +623,7 @@ Runs a tool-using agent loop: DeepSeek can call \`serp_search\` (Google via Serp
 | \`max_steps\` | number | No | \`8\` | Max tool calls before forcing a final answer. Hard-capped at \`15\` regardless of the value sent. |
 | \`reasoning\` | boolean | No | \`true\` | DeepSeek thinking mode. When enabled, each step's \`reasoning\` carries the model's chain of thought. Set \`false\` for a slightly faster, non-reasoning run. |
 | \`model\` | string | No | \`"deepseek-v4-flash"\` | DeepSeek model name. |
+| \`response_schema\` | object | No | — | A JSON structure/shape describing the desired final answer (e.g. \`{"answer": "string", "sources": ["string"]}\`). When set, the agent researches normally and then reformats its final answer with one extra (non-tool) model call — \`message\` becomes the **parsed JSON object** matching it instead of a plain string, and that extra call's tokens are included in \`usage\`. Best-effort, not schema-validated; malformed output falls back to \`{"error": "...", "raw": "..."}\`. |
 
 \`\`\`bash
 curl -X POST {{BASE_URL}}/explore \\
@@ -609,13 +640,25 @@ curl -X POST {{BASE_URL}}/explore \\
     { "step": 2, "tool": "fetch_page", "input": { "url": "https://empresa.com/careers" }, "output_summary": "Careers ... HubSpot ..." }
   ],
   "total_steps": 2,
-  "usage": { "prompt_tokens": 900, "completion_tokens": 210, "total_tokens": 1110 },
+  "usage": {
+    "prompt_tokens": 900,
+    "completion_tokens": 210,
+    "total_tokens": 1110,
+    "prompt_cache_hit_tokens": 0,
+    "prompt_cache_miss_tokens": 900,
+    "cost_usd": 0.0001848
+  },
   "duration_ms": 6200
 }
 \`\`\`
-Each step's \`reasoning\` is the assistant's message content accompanying that tool call (often empty). \`output_summary\` is the tool's JSON/text output truncated to 300 characters.
+Each step's \`reasoning\` is the assistant's message content accompanying that tool call (often empty). \`output_summary\` is the tool's JSON/text output truncated to 300 characters. \`usage.cost_usd\` is \`null\` if a custom \`model\` isn't in the known DeepSeek pricing table.
 
-**Errors**: \`400\` \`{ "error": "prompt is required" }\`; \`400\` \`{ "error": "max_steps must be a positive number" }\`; \`400\` \`{ "error": "model must be a string" }\`; \`503\` \`{ "error": "DEEPSEEK_API_KEY is not configured" }\`; \`502\` upstream DeepSeek failure; \`500\` unexpected.
+With \`response_schema\`, \`message\` looks like:
+\`\`\`json
+{ "message": { "answer": "empresa.com uses HubSpot; their careers page has referenced it since at least 2023." }, "...": "..." }
+\`\`\`
+
+**Errors**: \`400\` \`{ "error": "prompt is required" }\`; \`400\` \`{ "error": "max_steps must be a positive number" }\`; \`400\` \`{ "error": "model must be a string" }\`; \`400\` \`{ "error": "response_schema must be a JSON object" }\`; \`503\` \`{ "error": "DEEPSEEK_API_KEY is not configured" }\`; \`502\` upstream DeepSeek failure; \`500\` unexpected.
 
 ---
 
@@ -646,8 +689,8 @@ This service is also exposed as an [MCP (Model Context Protocol)](https://modelc
 | \`dnc_check\` | \`{client,email}\` | Read-only Do Not Contact check — call before contacting a lead in a client campaign. |
 | \`dnc_add\` | \`{client,list_type,entries[]}\` | Add emails/domains to a client's Do Not Contact list. |
 | \`dnc_list\` | \`{client,list_type?}\` | Read-only listing of a client's Do Not Contact entries. |
-| \`generate_copy\` | \`{prompt,system?,temperature?,max_tokens?}\` | Generate B2B outbound copy via DeepSeek. |
-| \`explore\` | \`{prompt,max_steps?}\` | Run a web-research agent (SERP + page fetch) and return its findings. |
+| \`generate_copy\` | \`{prompt,system?,temperature?,max_tokens?,response_schema?}\` | Generate B2B outbound copy via DeepSeek. Returns token usage + \`cost_usd\`; with \`response_schema\`, \`response\` is a parsed JSON object. |
+| \`explore\` | \`{prompt,max_steps?,response_schema?}\` | Run a web-research agent (SERP + page fetch) and return its findings, token usage + \`cost_usd\`. With \`response_schema\`, \`message\` is a parsed JSON object. |
 | \`get_stats\` | \`{}\` | Read-only aggregate email finder usage/cost metrics. |
 
 **Connecting from Claude Code**:

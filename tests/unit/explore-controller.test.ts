@@ -96,7 +96,46 @@ describe("exploreController.explore", () => {
     expect(res.body.message).toBe("Direct answer, no tools needed.");
     expect(res.body.total_steps).toBe(0);
     expect(res.body.steps).toEqual([]);
-    expect(res.body.usage).toEqual({ prompt_tokens: 5, completion_tokens: 5, total_tokens: 10 });
+    expect(res.body.usage.prompt_tokens).toBe(5);
+    expect(res.body.usage.completion_tokens).toBe(5);
+    expect(res.body.usage.total_tokens).toBe(10);
+    expect(typeof res.body.usage.cost_usd).toBe("number");
     expect(typeof res.body.duration_ms).toBe("number");
+  });
+
+  it("returns 400 when response_schema is not a JSON object", async () => {
+    const { req, res } = mockReqRes({ prompt: "research something", response_schema: "nope" });
+    await exploreController.explore(req, res);
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toMatch(/response_schema/i);
+  });
+
+  it("returns message as a parsed JSON object when response_schema is requested", async () => {
+    process.env.DEEPSEEK_API_KEY = "test-key";
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () =>
+        Promise.resolve({
+          choices: [{ message: { role: "assistant", content: "Direct answer, no tools needed." }, finish_reason: "stop" }],
+          usage: { prompt_tokens: 5, completion_tokens: 5, total_tokens: 10 },
+        }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { req, res } = mockReqRes({
+      prompt: "What is 2+2?",
+      response_schema: { answer: "string" },
+    });
+    await exploreController.explore(req, res);
+
+    expect(res.statusCode).toBe(200);
+    // Every DeepSeek call in this mock (including the extra structured-reformat call)
+    // returns the same plain-text content, which isn't valid JSON, so the agent falls
+    // back to its parse-failure shape instead of throwing.
+    expect(res.body.message).toEqual({
+      error: expect.stringContaining("valid JSON"),
+      raw: "Direct answer, no tools needed.",
+    });
   });
 });
