@@ -75,11 +75,12 @@ describe("MCP server (POST /mcp, GET /llms.txt)", () => {
 
     expect(res.status).toBe(200);
     const tools = res.body.result.tools;
-    expect(tools).toHaveLength(16);
+    expect(tools).toHaveLength(17);
 
     const names = tools.map((t: any) => t.name).sort();
     expect(names).toEqual(
       [
+        "check_credits",
         "create_client",
         "detect_tech",
         "dnc_add",

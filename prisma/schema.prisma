@@ -125,3 +125,24 @@ model SearchLog {
   @@index([domain])
   @@map("search_log")
 }
+
+// ─── Provider Credit Monitor ────────────────────────────────
+
+// One row per provider per check. Kept as history rather than a single
+// current-state row so we can see burn rate over time and, more immediately,
+// compare a check against the previous one — that's what lets the daily job
+// stay quiet while nothing changes and still announce a recovery.
+model ProviderCredit {
+  id         String   @id @default(uuid()) @db.Uuid
+  provider   String
+  status     String // 'green' | 'yellow' | 'red'
+  balance    Float? // credits or USD, see `unit`; null when unreadable
+  unit       String // 'credits' | 'usd' | 'unknown'
+  days_left  Float? // balance / measured daily burn, when burn is known
+  error      String? // set when the provider couldn't be read at all
+  raw        Json     @default("{}")
+  checked_at DateTime @default(now()) @db.Timestamptz(6)
+
+  @@index([provider, checked_at])
+  @@map("provider_credits")
+}

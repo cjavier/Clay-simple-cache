@@ -48,7 +48,7 @@ curl -H "Authorization: Bearer your_secret_key" {{BASE_URL}}/profiles?email=test
   - [\`POST /profiles\`](#profiles-post) · [\`GET /profiles\`](#profiles-get)
   - [\`POST /companies\`](#companies-post) · [\`GET /companies\`](#companies-get)
 - [7. Email Finder](#email-finder)
-  - [\`POST /find\`](#find-post) · [\`POST /verify\`](#verify-post) · [\`GET /stats\`](#stats-get)
+  - [\`POST /find\`](#find-post) · [\`POST /verify\`](#verify-post) · [\`GET /stats\`](#stats-get) · [\`GET /credits\`](#credits-get)
 - [8. Tech Detector](#tech-detector)
   - [\`POST /detect-tech\`](#detect-tech-post)
 - [9. LinkedIn Finder](#linkedin-finder)
@@ -78,6 +78,8 @@ curl -H "Authorization: Bearer your_secret_key" {{BASE_URL}}/profiles?email=test
 | \`POST\` | \`/find\` | Find the most likely email for a person at a domain. | [Email Finder](#find-post) |
 | \`POST\` | \`/verify\` | Verify an existing email address. | [Email Finder](#verify-post) |
 | \`GET\` | \`/stats\` | Aggregate email finder metrics. | [Email Finder](#stats-get) |
+| \`GET\` | \`/credits\` | Live balance + green/yellow/red status per paid provider. | [Credits](#credits-get) |
+| \`GET\` | \`/credits/history\` | Recorded balance history from the daily check. | [Credits](#credits-get) |
 | \`POST\` | \`/detect-tech\` | Detect web technologies used by a URL. | [Tech Detector](#detect-tech-post) |
 | \`POST\` | \`/find-linkedin\` | Resolve a domain to its LinkedIn company URL. | [LinkedIn Finder](#find-linkedin-post) |
 | \`POST\` | \`/clients\` | Create a client (handle derived from \`name\`). | [Clients & DNC](#clients-post) |
@@ -344,6 +346,55 @@ No params. Returns totals across all searches ever run.
   "catch_all_domains": 17
 }
 \`\`\`
+
+---
+
+<a id="credits-get"></a>
+### \`GET /credits\` — Provider Balances
+
+No params. Probes every paid provider's balance endpoint **live** on each call, so this is a real health check, not a cached view. Status is per provider and rolls up to a top-level worst-case:
+
+- \`green\` — comfortable runway
+- \`yellow\` — under 10 days of runway at the measured burn rate (or under $20 for DeepSeek)
+- \`red\` — depleted, unreadable, key missing, or under 3 days of runway
+
+A provider that can't be read is **red**, never green: an unknown balance is not a safe one.
+
+\`\`\`json
+{
+  "status": "red",
+  "checked_at": "2026-08-20T23:49:12.945Z",
+  "burn_per_day": { "searches": 1250, "verifications": 18030 },
+  "providers": [
+    {
+      "provider": "emaillistverify",
+      "label": "EmailListVerify",
+      "status": "red",
+      "balance": 0,
+      "unit": "credits",
+      "days_left": 0,
+      "error": "Sin creditos (error_credit en /find)",
+      "impact": "Tier 1 de verificacion - sin esto /find no confirma correos"
+    },
+    {
+      "provider": "serper",
+      "label": "Serper (Google)",
+      "status": "green",
+      "balance": 34297,
+      "unit": "credits",
+      "days_left": 27.4,
+      "error": null,
+      "impact": "Descubrimiento de patrones, /find-linkedin y el agente /explore"
+    }
+  ]
+}
+\`\`\`
+
+\`GET /credits/history?provider=serper&limit=50\` returns what the daily job recorded, newest first — useful for spotting a burn-rate change before it becomes an outage.
+
+> **Why this exists**: a depleted verification provider returns \`unknown\`, which is indistinguishable from "this email doesn't exist". \`/find\` kept answering \`200 OK\` with zero results for 82 days. If \`/find\` or \`/verify\` start returning \`unknown\` for everything, check this endpoint before concluding the addresses are bad.
+
+Thresholds are configurable via \`CREDIT_ALERT_RED_DAYS\`, \`CREDIT_ALERT_YELLOW_DAYS\`, \`CREDIT_ALERT_RED_USD\` and \`CREDIT_ALERT_YELLOW_USD\`. The daily job lives in \`scripts/check_credits.ts\` and posts to Slack when something is wrong or has just changed.
 
 ---
 

@@ -4,6 +4,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
 import prisma from "../db/prisma";
+import { checkAllCredits } from "../services/credit-monitor.service";
 import { Client, DncListType } from "../types";
 import {
   normalizeEmail,
@@ -1068,6 +1069,48 @@ export function buildMcpServer(): McpServer {
         domains_in_cache: domainsCached,
         patterns_learned: patternsLearned,
         catch_all_domains: catchAllCount,
+      });
+    })
+  );
+
+  // -- check_credits --------------------------------------------------------
+  server.registerTool(
+    "check_credits",
+    {
+      title: "Check Provider Credits",
+      description:
+        "Live green/yellow/red balance check of every paid provider (EmailListVerify, DeBounce, Serper, " +
+        "DeepSeek). Call this FIRST when find_email or verify_email keep returning status \"unknown\": a " +
+        "provider with no balance returns \"unknown\", which is indistinguishable from \"this email does " +
+        "not exist\". A provider that cannot be read is reported red, never green.",
+      inputSchema: {},
+      annotations: {
+        title: "Check Provider Credits",
+        readOnlyHint: true,
+        destructiveHint: false,
+        // Hits each provider's balance API, so this reaches outside the service.
+        openWorldHint: true,
+      },
+    },
+    safe(async () => {
+      const report = await checkAllCredits();
+      return ok({
+        status: report.worst,
+        checked_at: report.checked_at.toISOString(),
+        burn_per_day: {
+          searches: Math.round(report.burn.searches),
+          verifications: Math.round(report.burn.verifications),
+        },
+        providers: report.checks.map((c) => ({
+          provider: c.provider,
+          label: c.label,
+          status: c.status,
+          balance: c.balance,
+          unit: c.unit,
+          days_left: c.days_left === null ? null : Math.round(c.days_left * 10) / 10,
+          error: c.error,
+          impact: c.impact,
+        })),
       });
     })
   );

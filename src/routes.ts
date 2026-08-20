@@ -10,6 +10,7 @@ import { copyController } from './controllers/copy.controller';
 import { exploreController } from './controllers/explore.controller';
 import { mcpController } from './controllers/mcp.controller';
 
+import { creditsController } from './controllers/credits.controller';
 import { docsController } from './controllers/docs.controller';
 import { authMiddleware } from './middleware/auth.middleware';
 
@@ -27,6 +28,10 @@ router.get('/companies', authMiddleware, companiesController.get);
 router.post('/find', authMiddleware, emailFinderController.find);
 router.post('/verify', authMiddleware, emailFinderController.verify);
 router.get('/stats', authMiddleware, emailFinderController.stats);
+
+// Provider credit monitor (green / yellow / red per paid API)
+router.get('/credits', authMiddleware, creditsController.live);
+router.get('/credits/history', authMiddleware, creditsController.history);
 
 // Tech Detector
 router.post('/detect-tech', authMiddleware, techDetectorController.detect);
