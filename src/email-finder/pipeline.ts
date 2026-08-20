@@ -12,6 +12,7 @@ import {
 import { analyzeDomain } from "./domain-intel";
 import {
   normalizeName,
+  normalizeNameKeepingSpaces,
   parseFullName,
   generatePermutations,
   generatePermutationsFromFullName,
@@ -135,8 +136,10 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
   }
 
   // ── 2. Normalize ──
-  first = normalizeName(first);
-  last = normalizeName(last);
+  // Keep word boundaries: the variant builders in permutator.ts split compound
+  // surnames themselves, and stripping spaces here made that path unreachable.
+  first = normalizeNameKeepingSpaces(first);
+  last = normalizeNameKeepingSpaces(last);
   const domain = request.domain.trim().toLowerCase();
   const maxTier = Math.min(request.max_tier || 2, 2); // Cap at 2 (no Tier 3 yet)
 

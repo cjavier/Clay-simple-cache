@@ -4,22 +4,28 @@ interface Pattern {
   prevalence: number;
 }
 
+// Prevalence measured over the 149,208 verified emails already in our own
+// `profiles` table (Aug 2026), not estimated. Ordering matters: the pipeline
+// truncates to config.max_permutations_to_try, so anything mis-ranked here is
+// an email we never test. "f-last" was previously emitted by the SERP pattern
+// detector but had no builder, so it could never be generated.
 const PATTERNS: Pattern[] = [
-  { name: "first.last", build: (f, l) => `${f}.${l}`, prevalence: 0.35 },
-  { name: "flast", build: (f, l) => `${f[0]}${l}`, prevalence: 0.25 },
-  { name: "first", build: (f) => `${f}`, prevalence: 0.15 },
-  { name: "firstlast", build: (f, l) => `${f}${l}`, prevalence: 0.05 },
-  { name: "first_last", build: (f, l) => `${f}_${l}`, prevalence: 0.04 },
-  { name: "last", build: (_f, l) => `${l}`, prevalence: 0.03 },
-  { name: "lastf", build: (f, l) => `${l}${f[0]}`, prevalence: 0.02 },
-  { name: "last.first", build: (f, l) => `${l}.${f}`, prevalence: 0.02 },
-  { name: "f.last", build: (f, l) => `${f[0]}.${l}`, prevalence: 0.02 },
-  { name: "first.l", build: (f, l) => `${f}.${l[0]}`, prevalence: 0.01 },
-  { name: "firstl", build: (f, l) => `${f}${l[0]}`, prevalence: 0.01 },
-  { name: "first-last", build: (f, l) => `${f}-${l}`, prevalence: 0.01 },
-  { name: "f_last", build: (f, l) => `${f[0]}_${l}`, prevalence: 0.005 },
-  { name: "last_first", build: (f, l) => `${l}_${f}`, prevalence: 0.005 },
-  { name: "last.f", build: (f, l) => `${l}.${f[0]}`, prevalence: 0.005 },
+  { name: "first.last", build: (f, l) => `${f}.${l}`, prevalence: 0.2316 },
+  { name: "flast", build: (f, l) => `${f[0]}${l}`, prevalence: 0.1529 },
+  { name: "first", build: (f) => `${f}`, prevalence: 0.1102 },
+  { name: "firstlast", build: (f, l) => `${f}${l}`, prevalence: 0.0186 },
+  { name: "f.last", build: (f, l) => `${f[0]}.${l}`, prevalence: 0.0135 },
+  { name: "firstl", build: (f, l) => `${f}${l[0]}`, prevalence: 0.0090 },
+  { name: "last", build: (_f, l) => `${l}`, prevalence: 0.0088 },
+  { name: "first_last", build: (f, l) => `${f}_${l}`, prevalence: 0.0084 },
+  { name: "lastf", build: (f, l) => `${l}${f[0]}`, prevalence: 0.0042 },
+  { name: "first.l", build: (f, l) => `${f}.${l[0]}`, prevalence: 0.0030 },
+  { name: "last.first", build: (f, l) => `${l}.${f}`, prevalence: 0.0024 },
+  { name: "f-last", build: (f, l) => `${f[0]}-${l}`, prevalence: 0.0012 },
+  { name: "last.f", build: (f, l) => `${l}.${f[0]}`, prevalence: 0.0006 },
+  { name: "first-last", build: (f, l) => `${f}-${l}`, prevalence: 0.0003 },
+  { name: "f_last", build: (f, l) => `${f[0]}_${l}`, prevalence: 0.0003 },
+  { name: "last_first", build: (f, l) => `${l}_${f}`, prevalence: 0.0001 },
 ];
 
 /**
@@ -56,6 +62,16 @@ export function normalizeName(name: string): string {
     .replace(/[^a-z0-9\-]/g, "");
 }
 
+/**
+ * Like normalizeName but keeps word boundaries. The pipeline must use this
+ * instead of normalizeName: normalizeName() strips spaces, which collapsed
+ * "Pérez García" to "perezgarcia" before lastNameVariants() ever saw it and
+ * made the whole compound-surname path dead code in the /find flow.
+ */
+export function normalizeNameKeepingSpaces(name: string): string {
+  return normalizeKeepingSpaces(name);
+}
+
 function normalizeKeepingSpaces(name: string): string {
   return name
     .trim()
@@ -65,32 +81,71 @@ function normalizeKeepingSpaces(name: string): string {
     .replace(/[^a-z0-9\- ]/g, "");
 }
 
+/**
+ * Particles that are never a surname on their own — they glue onto the word
+ * that follows ("de la Torre" -> "delatorre"). Without this the permutator
+ * happily treats "de" or "la" as the surname: 3,121 searches in search_log
+ * were run against a bare particle.
+ */
+const SURNAME_PARTICLES = new Set([
+  "de", "del", "la", "las", "los", "y", "da", "do", "dos", "della", "di",
+  "van", "von", "der", "ter", "ten", "le", "el", "san", "santa", "mac", "mc",
+  "st", "bin", "al", "du", "af", "av",
+]);
+
+function isParticle(word: string): boolean {
+  return SURNAME_PARTICLES.has(normalizeName(word));
+}
+
 export function parseFullName(fullName: string): [string, string] {
-  const parts = fullName.trim().split(/\s+/);
+  const parts = fullName.trim().split(/\s+/).filter(Boolean);
   if (parts.length === 0) return ["", ""];
   if (parts.length === 1) return [parts[0], ""];
   if (parts.length === 2) return [parts[0], parts[1]];
-  if (parts.length === 3) return [parts[0], parts[1]];
-  // 4+ words: first word = first name, penultimate = first last name (LATAM)
-  return [parts[0], parts[parts.length - 2]];
+
+  // 3 words: first + second. 4+ words: first + penultimate — in Spanish the
+  // paternal surname sits before the maternal one.
+  const idx = parts.length === 3 ? 1 : parts.length - 2;
+
+  // The picked token may be a particle ("Javier de la Cruz" lands on "la").
+  // Absorb the particle run that introduces the surname and the word it
+  // belongs to, so we return "de la Cruz" rather than the meaningless "la".
+  let start = idx;
+  while (start > 1 && isParticle(parts[start - 1])) start--;
+  let end = idx;
+  while (end < parts.length - 1 && isParticle(parts[end])) end++;
+
+  return [parts[0], parts.slice(start, end + 1).join(" ")];
 }
 
 function lastNameVariants(rawLast: string): string[] {
   const normalized = normalizeKeepingSpaces(rawLast);
-  const variants: string[] = [];
+  if (!normalized) return [];
 
-  // Check for compound last names like "De la Cruz"
-  if (normalized.includes(" ")) {
-    const joined = normalized.replace(/\s+/g, "");
-    variants.push(joined);
-    // Also add just the last word
-    const words = normalized.split(/\s+/);
-    variants.push(words[words.length - 1]);
-  } else if (normalized.includes("-")) {
-    variants.push(normalized);
-    variants.push(normalized.replace(/-/g, ""));
-  } else {
-    variants.push(normalized);
+  // Glue particles onto the following word.
+  const words = normalized.split(/\s+/).filter(Boolean);
+  const parts: string[] = [];
+  let pending: string[] = [];
+  for (const word of words) {
+    if (SURNAME_PARTICLES.has(word)) {
+      pending.push(word);
+      continue;
+    }
+    parts.push(pending.length ? pending.join("") + word : word);
+    pending = [];
+  }
+  // All-particle input (e.g. a mis-parsed "de la"): keep it rather than drop it.
+  if (parts.length === 0 && pending.length > 0) parts.push(pending.join(""));
+
+  const variants: string[] = [];
+  if (parts.length >= 2) {
+    variants.push(parts[0]);                       // paternal — most common
+    variants.push(parts.join(""));                 // both, concatenated
+    variants.push(parts[parts.length - 1]);        // maternal
+    variants.push(parts[0] + parts[1][0]);         // paternal + maternal initial
+  } else if (parts.length === 1) {
+    variants.push(parts[0]);
+    if (parts[0].includes("-")) variants.push(parts[0].replace(/-/g, ""));
   }
 
   return variants.map(normalizeName).filter(Boolean);
@@ -162,6 +217,7 @@ export function generatePermutationsFromFullName(
   for (let i = 1; i < parts.length; i++) {
     const word = parts[i];
     if (word.endsWith(".")) continue;
+    if (isParticle(word)) continue;
     const normalized = normalizeName(word);
     if (normalized.length < 2) continue;
 

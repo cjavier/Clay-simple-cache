@@ -20,7 +20,9 @@ Full endpoint reference (request/response shapes, error codes, curl examples, an
   - Multi-tier API verification cascade (EmailListVerify, DeBounce).
   - Smart catch-all handling: uses SERP patterns + Debounce cross-validation instead of blind guessing.
   - Domain intelligence: MX lookup, provider detection, disposable/free checks.
-  - Pattern learning: remembers verified patterns per domain for faster future lookups.
+  - Pattern learning: remembers verified patterns per domain for faster future lookups. `scripts/backfill_domain_patterns.ts` seeds this table from the verified emails already in `profiles`, at no API cost.
+  - LATAM naming: compound surnames are split paternal-first (`Juan Pérez García` → `juan.perez@` before `juan.perezgarcia@`), which matches our own verified data 6.6:1, and particles are glued rather than treated as surnames (`de la Torre` → `delatorre`, never `la`).
+  - Pattern prevalence is measured from the 149k verified emails in `profiles`, not estimated.
   - Verification caching (30 days) and domain intel caching (7 days).
   - Parallel verification for speed (batches of 5 concurrent API calls).
 - **Tech Detector**:
@@ -35,6 +37,12 @@ Full endpoint reference (request/response shapes, error codes, curl examples, an
   - `POST /explore` — a tool-using research agent (Google search + page fetch, SSRF-guarded) that answers open-ended questions with sourced reasoning steps.
   - Both return `usage` (prompt/completion/cached tokens) and `usage.cost_usd` (computed from DeepSeek's per-model pricing).
   - Both accept an optional `response_schema` — a JSON shape describing the desired output — to get back parsed structured JSON (e.g. `{description, top_problems: [...]}`) instead of a single free-text string.
+- **Provider Credit Monitor**:
+  - `GET /credits` — live green/yellow/red balance for every paid API (EmailListVerify, DeBounce, Serper, DeepSeek).
+  - Status is runway-based: it divides each balance by the burn rate measured from `search_log`, so `yellow` means "under 10 days left at current usage", not an arbitrary number. DeepSeek uses USD floors instead, since its spend isn't logged.
+  - A provider that can't be read — bad key, network error, missing key — is reported **red**, never green.
+  - `scripts/check_credits.ts` runs daily (GitHub Actions), records every check in `provider_credits`, and posts to Slack when something is wrong or has just recovered. All-green runs stay silent on purpose.
+  - Exists because a depleted verifier returns `unknown`, which is indistinguishable from "email not found" — that failure mode went unnoticed for 82 days.
 - **Data Merging**: Merges JSON data safely, never destructively overwrites.
 - **ORM**: Builds on **Prisma** + **Supabase** (PostgreSQL).
 
@@ -61,6 +69,12 @@ Full endpoint reference (request/response shapes, error codes, curl examples, an
    | `DEBOUNCE_API_KEY` | **Yes** (for Email Finder) | Tier 2 email verification provider. |
    | `SERPER_API_KEY` | **Yes** (for Email Finder, LinkedIn Finder, Explore agent) | google.serper.dev — SERP pattern discovery, domain→LinkedIn resolution, and the `serp_search` tool. |
    | `DEEPSEEK_API_KEY` | **Yes** (for `/copy`, `/explore`) | DeepSeek chat completions API. Missing key returns `503` from those two endpoints only; the rest of the API works without it. |
+   | `SLACK_TOKEN` | No (needed for credit alerts) | Slack bot token (`xoxb-…`) with `chat:write`. Used only by `scripts/check_credits.ts`. |
+   | `SLACK_ALERT_CHANNEL` | No (needed for credit alerts) | Slack channel ID to post balance alerts to, e.g. `C0BSJ09ESCQ`. |
+   | `CREDIT_ALERT_RED_DAYS` | No (default `3`) | Runway in days below which a provider is red. |
+   | `CREDIT_ALERT_YELLOW_DAYS` | No (default `10`) | Runway in days below which a provider is yellow. |
+   | `CREDIT_ALERT_RED_USD` | No (default `5`) | DeepSeek USD balance below which it's red. |
+   | `CREDIT_ALERT_YELLOW_USD` | No (default `20`) | DeepSeek USD balance below which it's yellow. |
    | `ALLOWED_ORIGINS` | No | Comma-separated list of allowed CORS origins. Omitted/empty = CORS open (current default behavior). |
    | `RATE_LIMIT_PER_MIN` | No (default `300`) | Global per-IP rate limit (requests/minute), all routes. |
    | `COSTLY_RATE_LIMIT_PER_MIN` | No (default `30`) | Additional per-IP rate limit (requests/minute) stacked on `/find`, `/verify`, `/detect-tech`, `/copy`, `/explore`, `/find-linkedin`. |
@@ -94,6 +108,7 @@ npm start
 | `npm run prisma:generate` | Regenerate the Prisma client. |
 | `npm run prisma:push` | Push the schema directly to the database (dev only — bypasses migrations). |
 | `npm run prisma:studio` | Open Prisma Studio. |
+| `npm run check:credits` | Probe every provider's balance, record it, and alert Slack if anything is red/yellow or just changed. `--dry-run` to check without writing or alerting; `--force` to alert even when all green. |
 | `npm test` | `vitest run` — run the test suite once. |
 | `npm run test:watch` | `vitest` — run tests in watch mode. |
 
