@@ -6,17 +6,37 @@ import {
 } from "../types";
 import { config } from "../config";
 
+// EmailListVerify's published status list is incomplete — `antispam_system`
+// appeared in 3 of 12 live searches and was in no documentation. Anything not
+// listed here is logged and charged nothing (see verify()), so the next
+// undocumented status shows up in the logs instead of being silently billed
+// and flattened to "unknown".
+//
+// Statuses that leave deliverability genuinely undecided map to `unknown` on
+// purpose: it isn't in CONCLUSIVE_STATUSES, so the cascade falls through to
+// Tier 2 (DeBounce) instead of the pipeline accepting a non-answer.
 const RESPONSE_MAP: Record<string, { status: EmailStatus; confidence: number }> = {
   ok: { status: EmailStatus.valid, confidence: 0.95 },
   fail: { status: EmailStatus.invalid, confidence: 0.95 },
-  ok_for_all: { status: EmailStatus.catch_all, confidence: 0.5 },
-  unknown: { status: EmailStatus.unknown, confidence: 0.3 },
-  disposable: { status: EmailStatus.disposable, confidence: 0.95 },
-  role: { status: EmailStatus.role_account, confidence: 0.8 },
+  invalid: { status: EmailStatus.invalid, confidence: 0.95 },
+  syntax_error: { status: EmailStatus.invalid, confidence: 0.98 },
   email_disabled: { status: EmailStatus.invalid, confidence: 0.9 },
   domain_error: { status: EmailStatus.invalid, confidence: 0.9 },
-  error_credit: { status: EmailStatus.unknown, confidence: 0.0 },
-  error: { status: EmailStatus.unknown, confidence: 0.0 },
+  dead_server: { status: EmailStatus.invalid, confidence: 0.9 },
+  invalid_mx: { status: EmailStatus.no_mx, confidence: 0.95 },
+  dns_error: { status: EmailStatus.no_mx, confidence: 0.9 },
+  ok_for_all: { status: EmailStatus.catch_all, confidence: 0.5 },
+  accept_all: { status: EmailStatus.catch_all, confidence: 0.5 },
+  disposable: { status: EmailStatus.disposable, confidence: 0.95 },
+  role: { status: EmailStatus.role_account, confidence: 0.8 },
+  // Mailbox sits behind an anti-spam gateway or greylisting: the probe was
+  // refused, not answered. Undecided, so hand it to Tier 2.
+  antispam_system: { status: EmailStatus.unknown, confidence: 0.3 },
+  attempt_rejected: { status: EmailStatus.unknown, confidence: 0.3 },
+  smtp_protocol: { status: EmailStatus.unknown, confidence: 0.3 },
+  relay_error: { status: EmailStatus.unknown, confidence: 0.3 },
+  unknown_email: { status: EmailStatus.unknown, confidence: 0.3 },
+  unknown: { status: EmailStatus.unknown, confidence: 0.3 },
 };
 
 // EmailListVerify's "error" response is a generic/transient failure (e.g. a
@@ -74,10 +94,14 @@ export class EmailListVerifyProvider implements EmailVerificationProvider {
         return base;
       }
 
-      const mapped = RESPONSE_MAP[text] || {
-        status: EmailStatus.unknown,
-        confidence: 0.3,
-      };
+      // An unrecognized body (an HTML error page, a new status string) is not a
+      // verdict. Charging for it is how a broken provider kept reporting a cost
+      // per call while returning nothing usable.
+      const mapped = RESPONSE_MAP[text];
+      if (!mapped) {
+        console.error(`EmailListVerify returned an unrecognized status: ${text.slice(0, 80)}`);
+        return base;
+      }
 
       return {
         ...base,

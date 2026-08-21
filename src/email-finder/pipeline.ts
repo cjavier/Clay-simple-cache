@@ -55,9 +55,33 @@ const TIERS: EmailVerificationProvider[][] = [
   // Tier 3 (NeverBounce) — not implemented yet
 ];
 
+/**
+ * Per-search budget for Tier 2 escalations.
+ *
+ * Tier 2 (DeBounce) caps concurrent calls per ACCOUNT. On a domain where Tier 1
+ * can't conclude anything — a mailbox behind an anti-spam gateway answers
+ * `antispam_system` for every permutation — all 15 candidates escalated, and
+ * between this process and the deployed service that saturated the account and
+ * came back as HTTP 429. Throttled calls look exactly like undeliverable
+ * addresses, so the fan-out was actively producing wrong answers.
+ *
+ * Escalating every candidate was never useful anyway: if Tier 1 can't see the
+ * domain, asking Tier 2 about the 12th-most-likely spelling is noise. The budget
+ * spends Tier 2 on the most likely candidates, which are first in the list.
+ * Tier 1 coverage is untouched — every permutation is still checked there.
+ */
+interface TierBudget {
+  remaining: number;
+}
+
+const TIER2_BUDGET_PER_SEARCH = Number(
+  process.env.TIER2_BUDGET_PER_SEARCH || 5
+);
+
 async function apiCascade(
   email: string,
-  maxTier: number
+  maxTier: number,
+  tier2Budget?: TierBudget
 ): Promise<VerificationResult> {
   let totalCost = 0;
   // "risky" is not conclusive: keep the first one as a fallback but keep
@@ -66,6 +90,12 @@ async function apiCascade(
 
   for (let tierIdx = 0; tierIdx < TIERS.length; tierIdx++) {
     if (tierIdx + 1 > maxTier) break;
+
+    // Tier index 1+ is an escalation and draws from the budget when one is set.
+    if (tierIdx > 0 && tier2Budget) {
+      if (tier2Budget.remaining <= 0) break;
+      tier2Budget.remaining--;
+    }
 
     for (const provider of TIERS[tierIdx]) {
       if (!provider.is_configured()) continue;
@@ -99,14 +129,15 @@ async function apiCascade(
 async function apiCascadeParallel(
   emails: string[],
   maxTier: number,
-  concurrency: number = 5
+  concurrency: number = 5,
+  tier2Budget?: TierBudget
 ): Promise<VerificationResult[]> {
   const results: VerificationResult[] = new Array(emails.length);
 
   for (let i = 0; i < emails.length; i += concurrency) {
     const batch = emails.slice(i, i + concurrency);
     const batchResults = await Promise.all(
-      batch.map((email) => apiCascade(email, maxTier))
+      batch.map((email) => apiCascade(email, maxTier, tier2Budget))
     );
     for (let j = 0; j < batchResults.length; j++) {
       results[i + j] = batchResults[j];
@@ -316,10 +347,11 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
   let riskyCandidate: VerificationResult | null = null;
   let catchAllCandidate: VerificationResult | null = null;
   const BATCH_SIZE = 5;
+  const tier2Budget: TierBudget = { remaining: TIER2_BUDGET_PER_SEARCH };
 
   for (let i = 0; i < permutations.length; i += BATCH_SIZE) {
     const batch = permutations.slice(i, i + BATCH_SIZE);
-    const results = await apiCascadeParallel(batch, maxTier, BATCH_SIZE);
+    const results = await apiCascadeParallel(batch, maxTier, BATCH_SIZE, tier2Budget);
 
     permutationsTried += batch.length;
     apiCalls += batch.length;

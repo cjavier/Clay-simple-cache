@@ -176,50 +176,57 @@ describe("DebounceProvider", () => {
     expect(provider.method).toBe(VerificationMethod.debounce);
   });
 
-  it("maps 'Safe to Send' to valid", async () => {
+  // Codes come from the live API and are authoritative; the four `result`
+  // strings collapse distinctions we act on (2 and 3 both say "Invalid",
+  // 4 and 8 both say "Risky").
+  // https://help.debounce.com/understanding-results/result-codes/
+  it.each([
+    ["1", "Invalid", EmailStatus.invalid],       // Syntax
+    ["2", "Invalid", EmailStatus.invalid],       // Spam trap — must never be sent to
+    ["3", "Invalid", EmailStatus.disposable],    // Disposable
+    ["4", "Risky", EmailStatus.catch_all],       // Accept-All
+    ["5", "Safe to Send", EmailStatus.valid],    // Valid
+    ["6", "Invalid", EmailStatus.invalid],       // Bounce
+    ["7", "Unknown", EmailStatus.unknown],       // Unreachable
+    ["8", "Risky", EmailStatus.role_account],    // Role
+  ])("maps code %s (%s) to %s", async (code, resultText, expected) => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
       json: () => Promise.resolve({
-        debounce: { result: "Safe to Send", code: "5" },
+        debounce: { result: resultText, code, email: "test@example.com" },
+      }),
+    }));
+
+    const result = await provider.verify("test@example.com");
+    expect(result.status).toBe(expected);
+    // A verdict means DeBounce spent a credit, "unknown" included.
+    expect(result.cost_usd).toBe(0.0015);
+  });
+
+  it("falls back to the result string when the code is unrecognized", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      json: () => Promise.resolve({
+        debounce: { result: "Safe to Send", code: "99" },
       }),
     }));
 
     const result = await provider.verify("test@example.com");
     expect(result.status).toBe(EmailStatus.valid);
-    expect(result.confidence).toBe(0.95);
-    expect(result.cost_usd).toBe(0.0015);
   });
 
-  it("maps code '4' to catch_all regardless of result", async () => {
+  // Regression: an auth failure arrives as { debounce: { error } } — an object,
+  // so a truthiness check lets it through. Charging for it is what made the
+  // logged spend fictional while the provider was dead.
+  it("charges nothing when DeBounce returns an error object", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
       json: () => Promise.resolve({
-        debounce: { result: "Safe to Send", code: "4" },
+        debounce: { error: "Wrong API", code: "0" },
+        success: "0",
       }),
     }));
 
     const result = await provider.verify("test@example.com");
-    expect(result.status).toBe(EmailStatus.catch_all);
-  });
-
-  it("maps 'risky' result", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-      json: () => Promise.resolve({
-        debounce: { result: "Risky", code: "3" },
-      }),
-    }));
-
-    const result = await provider.verify("test@example.com");
-    expect(result.status).toBe(EmailStatus.risky);
-  });
-
-  it("maps 'invalid' result", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-      json: () => Promise.resolve({
-        debounce: { result: "Invalid", code: "1" },
-      }),
-    }));
-
-    const result = await provider.verify("test@example.com");
-    expect(result.status).toBe(EmailStatus.invalid);
+    expect(result.status).toBe(EmailStatus.unknown);
+    expect(result.cost_usd).toBe(0);
   });
 
   it("returns unknown on fetch error", async () => {
@@ -237,5 +244,119 @@ describe("DebounceProvider", () => {
 
     const result = await provider.verify("test@example.com");
     expect(result.status).toBe(EmailStatus.unknown);
+  });
+});
+
+describe("EmailListVerifyProvider — status mapping", () => {
+  let elv: EmailListVerifyProvider;
+  beforeEach(() => {
+    elv = new EmailListVerifyProvider();
+  });
+
+  const stub = (text: string) =>
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      text: () => Promise.resolve(text),
+    }));
+
+  it.each([
+    ["ok", EmailStatus.valid],
+    ["fail", EmailStatus.invalid],
+    ["invalid", EmailStatus.invalid],
+    ["ok_for_all", EmailStatus.catch_all],
+    ["accept_all", EmailStatus.catch_all],
+    ["disposable", EmailStatus.disposable],
+    ["role", EmailStatus.role_account],
+    ["invalid_mx", EmailStatus.no_mx],
+    // Observed live and absent from the published docs.
+    ["antispam_system", EmailStatus.unknown],
+    ["attempt_rejected", EmailStatus.unknown],
+  ])("maps %s to %s", async (text, expected) => {
+    stub(text);
+    const r = await elv.verify("a@b.com");
+    expect(r.status).toBe(expected);
+    expect(r.cost_usd).toBe(0.0004);
+  });
+
+  // Regression: the old fallback charged for any unrecognized body — an HTML
+  // error page or a status they added — while reporting a useless "unknown".
+  it("charges nothing for an unrecognized status", async () => {
+    stub("some_status_we_have_never_seen");
+    const r = await elv.verify("a@b.com");
+    expect(r.status).toBe(EmailStatus.unknown);
+    expect(r.cost_usd).toBe(0);
+  });
+
+  it("charges nothing when credits are exhausted", async () => {
+    stub("error_credit");
+    const r = await elv.verify("a@b.com");
+    expect(r.status).toBe(EmailStatus.unknown);
+    expect(r.cost_usd).toBe(0);
+  });
+});
+
+describe("DebounceProvider — concurrency and throttling", () => {
+  // Measured live: 3 parallel calls pass, 5 and 8 get HTTP 429. The pipeline
+  // verifies 5 permutations at a time, so without a cap here the extra calls
+  // came back as silent `unknown` and looked like undeliverable addresses.
+  it("never exceeds 3 concurrent calls even when 8 are requested at once", async () => {
+    let inFlight = 0;
+    let peak = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      await new Promise((r) => setTimeout(r, 12));
+      inFlight--;
+      return {
+        status: 200,
+        json: () => Promise.resolve({ debounce: { code: "5", result: "Safe to Send" } }),
+      } as any;
+    }));
+
+    const provider = new DebounceProvider();
+    const results = await Promise.all(
+      Array.from({ length: 8 }, (_, i) => provider.verify(`u${i}@example.com`))
+    );
+
+    expect(peak).toBeLessThanOrEqual(3);
+    expect(results).toHaveLength(8);
+    expect(results.every((r) => r.status === EmailStatus.valid)).toBe(true);
+  });
+
+  it("retries a 429 and succeeds on the next attempt", async () => {
+    let calls = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      calls++;
+      if (calls === 1) return { status: 429, json: () => Promise.resolve({}) } as any;
+      return {
+        status: 200,
+        json: () => Promise.resolve({ debounce: { code: "5", result: "Safe to Send" } }),
+      } as any;
+    }));
+
+    const r = await new DebounceProvider().verify("a@b.com");
+    expect(calls).toBe(2);
+    expect(r.status).toBe(EmailStatus.valid);
+    expect(r.cost_usd).toBe(0.0015);
+  });
+
+  it("gives up after repeated 429s without charging", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      status: 429,
+      json: () => Promise.resolve({}),
+    } as any)));
+
+    const r = await new DebounceProvider().verify("a@b.com");
+    expect(r.status).toBe(EmailStatus.unknown);
+    expect(r.cost_usd).toBe(0);
+  });
+
+  it("releases its slot when the call throws, so the queue can't deadlock", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("boom")));
+    const provider = new DebounceProvider();
+    // More failures than the concurrency cap: if the slot leaked, this hangs.
+    const results = await Promise.all(
+      Array.from({ length: 6 }, () => provider.verify("a@b.com"))
+    );
+    expect(results.every((r) => r.status === EmailStatus.unknown)).toBe(true);
   });
 });
