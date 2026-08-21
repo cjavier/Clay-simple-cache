@@ -394,7 +394,7 @@ A provider that can't be read is **red**, never green: an unknown balance is not
 
 > **Why this exists**: a depleted verification provider returns \`unknown\`, which is indistinguishable from "this email doesn't exist". \`/find\` kept answering \`200 OK\` with zero results for 82 days. If \`/find\` or \`/verify\` start returning \`unknown\` for everything, check this endpoint before concluding the addresses are bad.
 
-Thresholds are configurable via \`CREDIT_ALERT_RED_DAYS\`, \`CREDIT_ALERT_YELLOW_DAYS\`, \`CREDIT_ALERT_RED_USD\` and \`CREDIT_ALERT_YELLOW_USD\`. The daily job lives in \`src/jobs/check-credits.ts\` and posts to Slack when something is wrong or has just changed.
+Thresholds are configurable via \`CREDIT_ALERT_RED_DAYS\`, \`CREDIT_ALERT_YELLOW_DAYS\`, \`CREDIT_ALERT_RED_USD\` and \`CREDIT_ALERT_YELLOW_USD\`. The daily run is scheduled inside the API process (\`src/jobs/credit-check-schedule.ts\`, armed by \`CREDIT_CHECK_DAILY=true\`, 14:00 UTC) and posts to Slack when something is wrong or has just changed. \`npm run check:credits\` triggers the same check by hand.
 
 ---
 

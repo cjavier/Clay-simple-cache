@@ -1,9 +1,0 @@
-{
-  "$schema": "https://railway.com/railway.schema.json",
-  "deploy": {
-    "startCommand": "node dist/jobs/check-credits.js",
-    "cronSchedule": "0 14 * * *",
-    "restartPolicyType": "NEVER",
-    "numReplicas": 1
-  }
-}
