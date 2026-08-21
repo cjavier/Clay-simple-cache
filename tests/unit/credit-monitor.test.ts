@@ -88,7 +88,9 @@ describe("shouldNotify", () => {
     const { notify, changes } = shouldNotify(report([check("a", "green")]), prev);
     expect(notify).toBe(true);
     expect(changes).toHaveLength(1);
-    expect(changes[0]).toContain("AGOTADO");
+    // Transitions use status-only wording — the previous run's balance isn't
+    // at hand, so "ROJO" rather than a cause-specific word like AGOTADO.
+    expect(changes[0]).toContain("ROJO");
     expect(changes[0]).toContain("OK");
   });
 
@@ -251,5 +253,19 @@ describe("getPreviousStatuses", () => {
     const prev = await getPreviousStatuses();
     expect(prev.get("serper")).toBe("green");
     expect(prev.get("debounce")).toBe("red");
+  });
+});
+
+describe("alert wording distinguishes why a provider is red", () => {
+  // Regression: a provider holding 50,000 credits that is red purely because
+  // that's under three days of runway was labelled "AGOTADO" (depleted), which
+  // describes the opposite situation.
+  it("calls a depleted provider AGOTADO and a low-runway one CRÍTICO", async () => {
+    const { __testWord } = await import("../../src/services/slack.service");
+    expect(__testWord(check("a", "red", { balance: 0 }))).toBe("AGOTADO");
+    expect(__testWord(check("a", "red", { balance: 49997, days_left: 2.7 }))).toBe("CRÍTICO");
+    expect(__testWord(check("a", "red", { balance: null }))).toBe("SIN ACCESO");
+    expect(__testWord(check("a", "yellow", { balance: 5000 }))).toBe("BAJO");
+    expect(__testWord(check("a", "green", { balance: 90000 }))).toBe("OK");
   });
 });

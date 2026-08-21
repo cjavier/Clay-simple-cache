@@ -14,10 +14,25 @@ const EMOJI: Record<CreditStatus, string> = {
   red: "🔴",
 };
 
+/**
+ * Why a provider is in the state it's in — red has three very different causes
+ * and one word for all of them misleads. "AGOTADO" on a provider holding 50,000
+ * credits (red only because that is under three days of runway) reads as a
+ * balance problem when it is a burn-rate problem.
+ */
+function word(c: CreditCheck): string {
+  if (c.status === "green") return "OK";
+  if (c.status === "yellow") return "BAJO";
+  if (c.balance === null) return "SIN ACCESO";
+  if (c.balance <= 0) return "AGOTADO";
+  return "CRÍTICO";
+}
+
+/** Status-only wording, for transitions where the balance isn't at hand. */
 const WORD: Record<CreditStatus, string> = {
   green: "OK",
   yellow: "BAJO",
-  red: "AGOTADO",
+  red: "ROJO",
 };
 
 export function isSlackConfigured(): boolean {
@@ -48,7 +63,7 @@ function providerLines(checks: CreditCheck[]): string {
   return [...checks]
     .sort((a, b) => order[a.status] - order[b.status])
     .map((c) => {
-      const head = `${EMOJI[c.status]}  *${c.label}* — ${WORD[c.status]}`;
+      const head = `${EMOJI[c.status]}  *${c.label}* — ${word(c)}`;
       const detail = c.error
         ? `\`${c.error}\``
         : `${fmtBalance(c)}${fmtRunway(c)}`;
@@ -62,7 +77,7 @@ function headline(report: CreditReport, changes: string[]): string {
   const yellows = report.checks.filter((c) => c.status === "yellow").length;
 
   if (reds > 0) {
-    return `🔴 ${reds} proveedor${reds > 1 ? "es" : ""} sin saldo${
+    return `🔴 ${reds} proveedor${reds > 1 ? "es" : ""} en rojo${
       yellows > 0 ? ` · ${yellows} bajo${yellows > 1 ? "s" : ""}` : ""
     }`;
   }
@@ -200,3 +215,6 @@ export function shouldNotify(
   const notify = report.worst !== "green" || changes.length > 0;
   return { notify, changes };
 }
+
+/** Exported for tests only. */
+export const __testWord = word;
