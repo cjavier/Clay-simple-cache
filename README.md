@@ -42,7 +42,7 @@ Full endpoint reference (request/response shapes, error codes, curl examples, an
   - Status is runway-based: it divides each balance by the burn rate measured from `search_log`, so `yellow` means "under 10 days left at current usage", not an arbitrary number. DeepSeek uses USD floors instead, since its spend isn't logged.
   - A provider that can't be read — bad key, network error, missing key — is reported **red**, never green.
   - `src/jobs/check-credits.ts` runs daily on Railway (service `credit-check-cron`, `0 14 * * *` UTC = 08:00 CDMX), records every check in `provider_credits`, and posts to Slack when something is wrong or has just recovered. All-green runs stay silent on purpose.
-  - The cron service runs `node dist/jobs/check-credits.js` with restart policy `NEVER` — the job exits non-zero when a provider is red, and restarting on failure would re-post to Slack in a loop.
+  - The cron service runs `node dist/jobs/check-credits.js` with restart policy `NEVER`. The job's exit code reports whether the *check* worked, not what it found: a red provider exits 0 (Slack is the channel for that), while an unhandled error or an alert that couldn't be delivered exits 1. So a failed run in Railway always means something Slack didn't already tell you.
   - Exists because a depleted verifier returns `unknown`, which is indistinguishable from "email not found" — that failure mode went unnoticed for 82 days.
 - **Data Merging**: Merges JSON data safely, never destructively overwrites.
 - **ORM**: Builds on **Prisma** + **Supabase** (PostgreSQL).

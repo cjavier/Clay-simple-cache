@@ -15,7 +15,13 @@
  *   npm run check:credits -- --force   # alert even if everything is green
  *   node dist/jobs/check-credits.js    # production / Railway cron
  *
- * Exit code is 1 when any provider is red, so a cron or CI job fails visibly.
+ * Exit code reflects whether THIS JOB worked, not what it found. A red provider
+ * is a successful detection — Slack is the channel for that. Exiting non-zero on
+ * a red provider made the Railway cron service read "last run failed" every day
+ * for as long as the provider stayed broken, which is the same alert fatigue the
+ * all-green silence rule exists to prevent. Non-zero is reserved for the job
+ * genuinely failing: an unhandled error, or an alert that had to be delivered
+ * and wasn't.
  */
 import "dotenv/config";
 import prisma from "../db/prisma";
@@ -75,7 +81,7 @@ async function main() {
         notify || FORCE ? "Se habría enviado alerta a Slack." : "No se habría alertado."
       }`
     );
-    return report;
+    return { report, alertFailed: false };
   }
 
   await persistReport(report);
@@ -83,24 +89,27 @@ async function main() {
 
   if (!notify && !FORCE) {
     console.log("Todo verde y sin cambios — sin alerta (silencio es lo normal).");
-    return report;
+    return { report, alertFailed: false };
   }
 
   if (!isSlackConfigured()) {
     console.log(
       "Slack no configurado (falta SLACK_TOKEN o SLACK_ALERT_CHANNEL) — sin alerta."
     );
-    return report;
+    // Deliberately not a failure: running without Slack is a valid local mode.
+    return { report, alertFailed: false };
   }
 
   const sent = await sendCreditAlert(report, { changes });
   console.log(sent.ok ? `Alerta enviada a Slack (ts ${sent.ts}).` : `Slack falló: ${sent.error}`);
-  return report;
+  // An undelivered alert IS a job failure: the problem was found and nobody was
+  // told, which is worse than not checking at all.
+  return { report, alertFailed: !sent.ok };
 }
 
 main()
-  .then((report) => {
-    process.exitCode = report.worst === "red" ? 1 : 0;
+  .then(({ alertFailed }) => {
+    process.exitCode = alertFailed ? 1 : 0;
   })
   .catch((e) => {
     console.error(e);
