@@ -41,7 +41,8 @@ Full endpoint reference (request/response shapes, error codes, curl examples, an
   - `GET /credits` — live green/yellow/red balance for every paid API (EmailListVerify, DeBounce, Serper, DeepSeek).
   - Status is runway-based: it divides each balance by the burn rate measured from `search_log`, so `yellow` means "under 10 days left at current usage", not an arbitrary number. DeepSeek uses USD floors instead, since its spend isn't logged.
   - A provider that can't be read — bad key, network error, missing key — is reported **red**, never green.
-  - `scripts/check_credits.ts` runs daily (GitHub Actions), records every check in `provider_credits`, and posts to Slack when something is wrong or has just recovered. All-green runs stay silent on purpose.
+  - `src/jobs/check-credits.ts` runs daily on Railway (service `credit-check-cron`, `0 14 * * *` UTC = 08:00 CDMX), records every check in `provider_credits`, and posts to Slack when something is wrong or has just recovered. All-green runs stay silent on purpose.
+  - The cron service runs `node dist/jobs/check-credits.js` with restart policy `NEVER` — the job exits non-zero when a provider is red, and restarting on failure would re-post to Slack in a loop.
   - Exists because a depleted verifier returns `unknown`, which is indistinguishable from "email not found" — that failure mode went unnoticed for 82 days.
 - **Data Merging**: Merges JSON data safely, never destructively overwrites.
 - **ORM**: Builds on **Prisma** + **Supabase** (PostgreSQL).
@@ -69,7 +70,7 @@ Full endpoint reference (request/response shapes, error codes, curl examples, an
    | `DEBOUNCE_API_KEY` | **Yes** (for Email Finder) | Tier 2 email verification provider. |
    | `SERPER_API_KEY` | **Yes** (for Email Finder, LinkedIn Finder, Explore agent) | google.serper.dev — SERP pattern discovery, domain→LinkedIn resolution, and the `serp_search` tool. |
    | `DEEPSEEK_API_KEY` | **Yes** (for `/copy`, `/explore`) | DeepSeek chat completions API. Missing key returns `503` from those two endpoints only; the rest of the API works without it. |
-   | `SLACK_TOKEN` | No (needed for credit alerts) | Slack bot token (`xoxb-…`) with `chat:write`. Used only by `scripts/check_credits.ts`. |
+   | `SLACK_TOKEN` | No (needed for credit alerts) | Slack bot token (`xoxb-…`) with `chat:write`. Used only by `src/jobs/check-credits.ts`. |
    | `SLACK_ALERT_CHANNEL` | No (needed for credit alerts) | Slack channel ID to post balance alerts to, e.g. `C0BSJ09ESCQ`. |
    | `CREDIT_ALERT_RED_DAYS` | No (default `3`) | Runway in days below which a provider is red. |
    | `CREDIT_ALERT_YELLOW_DAYS` | No (default `10`) | Runway in days below which a provider is yellow. |

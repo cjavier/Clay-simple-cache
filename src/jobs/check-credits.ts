@@ -5,25 +5,30 @@
  * measured burn rate, writes the result to `provider_credits`, and posts to
  * Slack when something is wrong or has just changed.
  *
+ * Lives under src/ (not scripts/) so `tsc` compiles it into dist/ — the Railway
+ * cron service runs the compiled `node dist/jobs/check-credits.js`, with no
+ * ts-node in the production image.
+ *
  * Usage:
- *   npx ts-node scripts/check_credits.ts              # check, persist, alert if needed
- *   npx ts-node scripts/check_credits.ts --dry-run    # check only, no DB write, no Slack
- *   npx ts-node scripts/check_credits.ts --force      # alert even if everything is green
+ *   npm run check:credits              # check, persist, alert if needed
+ *   npm run check:credits -- --dry-run # check only, no DB write, no Slack
+ *   npm run check:credits -- --force   # alert even if everything is green
+ *   node dist/jobs/check-credits.js    # production / Railway cron
  *
  * Exit code is 1 when any provider is red, so a cron or CI job fails visibly.
  */
 import "dotenv/config";
-import prisma from "../src/db/prisma";
+import prisma from "../db/prisma";
 import {
   checkAllCredits,
   getPreviousStatuses,
   persistReport,
-} from "../src/services/credit-monitor.service";
+} from "../services/credit-monitor.service";
 import {
   sendCreditAlert,
   shouldNotify,
   isSlackConfigured,
-} from "../src/services/slack.service";
+} from "../services/slack.service";
 
 const DRY_RUN = process.argv.includes("--dry-run");
 const FORCE = process.argv.includes("--force");

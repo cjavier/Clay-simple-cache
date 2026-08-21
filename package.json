@@ -12,7 +12,8 @@
     "prisma:studio": "prisma studio",
     "migrate:deploy": "prisma migrate deploy",
     "migrate:status": "prisma migrate status",
-    "check:credits": "ts-node scripts/check_credits.ts",
+    "check:credits": "ts-node src/jobs/check-credits.ts",
+    "check:credits:prod": "node dist/jobs/check-credits.js",
     "test": "vitest run",
     "test:watch": "vitest"
   },
