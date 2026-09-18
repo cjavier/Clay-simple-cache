@@ -530,8 +530,12 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
   const BATCH_SIZE = 5;
   const tier2Budget: TierBudget = { remaining: TIER2_BUDGET_PER_SEARCH };
 
+  let timedOut = false;
   for (let i = 0; i < toTry.length; i += BATCH_SIZE) {
-    if (deadline.expired) break;
+    if (deadline.expired) {
+      timedOut = true;
+      break;
+    }
 
     const batch = toTry.slice(i, i + BATCH_SIZE);
     const results = await apiCascadeParallel(batch, maxTier, BATCH_SIZE, tier2Budget);
@@ -600,18 +604,22 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
       cost_usd: totalCost,
       duration_ms: Date.now() - start,
       ...identityInfo,
+      timed_out: timedOut,
     });
   }
 
   // ── 13. Nothing conclusive ──
-  await recordDomainOutcome(domain, false);
+  // A search that ran out of time did NOT establish that the domain is
+  // fruitless, so it must not count against the circuit breaker — otherwise a
+  // slow afternoon would mute domains that answer perfectly well.
+  if (!timedOut) await recordDomainOutcome(domain, false);
 
   if (riskyCandidate) {
     await logSearch(first, last, domain, riskyCandidate.email, "risky", riskyCandidate.method, permutationsTried, apiCalls, totalCost, Date.now() - start);
-    return { ...riskyCandidate, serp_info: serpInfo, duration_ms: Date.now() - start, cost_usd: totalCost, ...identityInfo };
+    return { ...riskyCandidate, serp_info: serpInfo, duration_ms: Date.now() - start, cost_usd: totalCost, ...identityInfo, timed_out: timedOut };
   }
 
-  await logSearch(first, last, domain, null, "unknown", null, permutationsTried, apiCalls, totalCost, Date.now() - start);
+  await logSearch(first, last, domain, null, "unknown", timedOut ? "timed_out" : null, permutationsTried, apiCalls, totalCost, Date.now() - start);
   return makeResult({
     status: EmailStatus.unknown,
     domain_info: domainInfo,
@@ -620,6 +628,7 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
     cost_usd: totalCost,
     duration_ms: Date.now() - start,
     ...identityInfo,
+    timed_out: timedOut,
   });
 }
 

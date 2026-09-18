@@ -98,6 +98,7 @@ export const emailFinderController = {
         permutations_tried: result.permutations_tried,
         identity_source: result.identity_source,
         surnames_tried: result.surnames_tried,
+        timed_out: result.timed_out,
         cost_usd: result.cost_usd,
         duration_ms: result.duration_ms,
         ...(dncRequested ? { do_not_contact: false } : {}),

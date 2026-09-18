@@ -69,6 +69,17 @@ export interface VerificationResult {
   identity_source?: "linkedin" | "full_name" | "given";
   /** The surnames actually tried, in the order they were tried. */
   surnames_tried?: string[];
+  /**
+   * The search hit its wall-clock budget before exhausting its candidates.
+   *
+   * This is the `partial` answer: what we had when time ran out, not a verdict.
+   * It is a separate field rather than a `status` value on purpose — `unknown`
+   * already means two different things ("checked, nothing there" and "could not
+   * check"), and that exact ambiguity is what let a 103-day provider outage look
+   * like a mailbox problem. Callers should treat `timed_out: true` as "ask
+   * again later", never as "this person has no address".
+   */
+  timed_out?: boolean;
 }
 
 export interface FindRequest {
