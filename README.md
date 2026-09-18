@@ -14,17 +14,22 @@ Full endpoint reference (request/response shapes, error codes, curl examples, an
   - Normalization: Domain (trim, lowercase, remove www/protocol), LinkedIn.
   - Resolution priority: Domain > LinkedIn.
 - **Email Finder**:
-  - Given a name + domain, generates email permutations (15 patterns, LATAM-aware).
-  - SERP-based pattern discovery: searches Google for `"@domain.com"` to find real emails and identify the domain's pattern before brute-forcing.
-  - Cross-references multiple SERP emails to resolve ambiguous patterns (flast vs lastf, etc.).
-  - Multi-tier API verification cascade (EmailListVerify, DeBounce).
-  - Smart catch-all handling: uses SERP patterns + Debounce cross-validation instead of blind guessing.
-  - Domain intelligence: MX lookup, provider detection, disposable/free checks.
-  - Pattern learning: remembers verified patterns per domain for faster future lookups. `scripts/backfill_domain_patterns.ts` seeds this table from the verified emails already in `profiles`, at no API cost.
-  - LATAM naming: compound surnames are split paternal-first (`Juan Pérez García` → `juan.perez@` before `juan.perezgarcia@`), which matches our own verified data 6.6:1, and particles are glued rather than treated as surnames (`de la Torre` → `delatorre`, never `la`).
-  - Pattern prevalence is measured from the 149k verified emails in `profiles`, not estimated.
-  - Verification caching (30 days) and domain intel caching (7 days).
-  - Parallel verification for speed (batches of 5 concurrent API calls).
+  - **Reads the name off the LinkedIn slug, not just the `last_name` field.** In a LATAM name the mailbox is built on the *paternal* surname, but the `last_name` we receive is the *maternal* one 74.9% of the time (measured over the 68,719 profiles here that carry two surnames), while 57.2% of real addresses use the paternal surname. `roberto-lozano-martinez` arrives as "Roberto Martinez" and his address is `rlozano@` — unreachable at any budget from the name as sent. Replayed over 119,981 known-good corporate addresses, the name as received tops out at **59.1%**; the surnames recovered from the slug reach **79.6%**. `/find` accepts `linkedin_url`/`linkedin_slug`; pass it whenever you have it.
+  - **Five candidates, not fifteen.** With the right surname, 3 candidates beat the old 15 (62.7% vs 59.1%) and 5 reach 66.8%. Candidates 6–15 bought 4 points for twice the spend.
+  - **Spends in order of what's free first**: addresses already in `profiles` → the domain's learned pattern → a domain-cached Google lookup → verified candidates. 75.8% of searches land on a domain we already hold an address for.
+  - **Pattern-first for known domains**: where a domain has ≥3 known addresses the search verifies exactly one candidate. Leave-one-out over `profiles` puts that guess right **81.5%** of the time, against 33.3% for the catch-all guessing it replaces. `scripts/backfill_domain_patterns.ts --commit` mines this from existing data at no API cost — it covers 56,340 domains.
+  - **Catch-all domains are answered from the pattern, not probed.** A catch-all server accepts every local part by definition, so scanning candidates there buys identical "yes" answers. `domain_intel.is_catch_all` is now actually written (it was a hardcoded `false` in both upsert branches, so all 63,291 rows said false).
+  - **A domain that never answers stops being asked**: 10 fruitless searches mute it for 30 days. 6,889 such domains cost $135 in four weeks — `banorte.com.mx` alone was 549 searches for 0 results.
+  - **Everything that can be cached is**: verification verdicts including the negatives (20.1% of searches repeat a person+domain), SERP keyed by domain rather than by search (139,560 duplicate calls, $139.56), domain intel, learned patterns.
+  - **Bounded in time**: a hard 20s budget per search, and a cap on the DeBounce queue so a burst sheds to Tier 1 instead of parking. The median `catch_all` answer used to take 72 minutes and the slowest search 7h56m; answers over an hour were kept by the caller only 29.4% of the time, against 99.3% under 30 seconds.
+  - **`POST /find/batch`** returns a job id immediately and **`GET /find/batch/:id`** collects the results, so a campaign list never races an HTTP timeout. Interrupted jobs resume on boot.
+  - Multi-tier API verification cascade (EmailListVerify, DeBounce), MX lookup, provider detection, disposable/free checks.
+  - LATAM naming: compound surnames are split paternal-first, particles are glued rather than treated as surnames (`de la Torre` → `delatorre`, never `la`), and the compound-initial spelling (`José Carlos Morente` → `jcmorente@`) is generated.
+  - Pattern prevalence is measured from the verified emails in `profiles`, not estimated.
+- **Finder Quality Monitor**:
+  - `GET /stats` used to report `valid / total_searches`, which says nothing about whether the address was right — and hid the gap that mattered: `valid` matches the address another provider found **95.2%** of the time, `catch_all` **33.3%**. Both were one number.
+  - `stats.quality` now reports agreement and delivery per verdict, plus latency percentiles. "Delivery" is whether the address we returned exists in `profiles` — a direct read on whether callers are still listening.
+  - The daily job that watches provider balances also alerts when `catch_all` precision drops under 60%, `valid` under 85%, or the median answer passes 30s. Those are the two indicators that would have caught both failures months earlier.
 - **Tech Detector**:
   - Given a URL, fetches its HTML and detects web technologies (CMS, ecommerce, analytics, tag managers, marketing tools, advertising pixels, payment integrations, CDN, SEO plugins, and privacy tools).
 - **LinkedIn Finder**:

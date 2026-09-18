@@ -48,7 +48,7 @@ curl -H "Authorization: Bearer your_secret_key" {{BASE_URL}}/profiles?email=test
   - [\`POST /profiles\`](#profiles-post) · [\`GET /profiles\`](#profiles-get)
   - [\`POST /companies\`](#companies-post) · [\`GET /companies\`](#companies-get)
 - [7. Email Finder](#email-finder)
-  - [\`POST /find\`](#find-post) · [\`POST /verify\`](#verify-post) · [\`GET /stats\`](#stats-get) · [\`GET /credits\`](#credits-get)
+  - [\`POST /find\`](#find-post) · [\`POST /find/batch\`](#find-batch-post) · [\`POST /verify\`](#verify-post) · [\`GET /stats\`](#stats-get) · [\`GET /credits\`](#credits-get)
 - [8. Tech Detector](#tech-detector)
   - [\`POST /detect-tech\`](#detect-tech-post)
 - [9. LinkedIn Finder](#linkedin-finder)
@@ -76,6 +76,8 @@ curl -H "Authorization: Bearer your_secret_key" {{BASE_URL}}/profiles?email=test
 | \`POST\` | \`/companies\` | Upsert/enrich a company by domain or LinkedIn. | [Cache](#companies-post) |
 | \`GET\` | \`/companies\` | Look up a company; optional \`dnc_client\` gate. | [Cache](#companies-get) |
 | \`POST\` | \`/find\` | Find the most likely email for a person at a domain. | [Email Finder](#find-post) |
+| \`POST\` | \`/find/batch\` | Queue a list of searches; returns a job id immediately. | [Email Finder](#find-batch-post) |
+| \`GET\` | \`/find/batch/:id\` | Batch job status and results. | [Email Finder](#find-batch-get) |
 | \`POST\` | \`/verify\` | Verify an existing email address. | [Email Finder](#verify-post) |
 | \`GET\` | \`/stats\` | Aggregate email finder metrics. | [Email Finder](#stats-get) |
 | \`GET\` | \`/credits\` | Live balance + green/yellow/red status per paid provider. | [Credits](#credits-get) |
@@ -248,7 +250,11 @@ Same merge semantics as profiles, resolved by **domain > linkedin_slug**.
 <a id="email-finder"></a>
 ## 7. Email Finder
 
-Given a name and a domain, generates likely email permutations (15 patterns, LATAM-name-aware), tries to shortcut via SERP pattern discovery, and verifies candidates through a cost-tiered provider cascade (EmailListVerify → Debounce). Results and learned patterns are cached.
+Given a name and a domain, finds the most likely mailbox and verifies it.
+
+**Send \`linkedin_url\` whenever you have it.** In a LATAM name the mailbox is almost always built on the *paternal* surname, but the \`last_name\` field usually carries the *maternal* one — measured across 68,719 profiles here, 74.9% of the time — while 57.2% of real addresses use the paternal surname. The LinkedIn slug carries the whole name, so passing it lifts the share of addresses that can be found at all from 59% to 77%. It costs nothing and it is the single highest-value field in the request.
+
+The search spends in this order, stopping at the first answer: addresses already in the cache → the domain's learned mailbox pattern (right 81.5% of the time where the evidence exists) → a Google lookup for the domain, cached 30 days → up to five verified candidates through the cost-tiered cascade (EmailListVerify → DeBounce). A domain that has returned nothing for ten straight searches is muted for 30 days and answers free.
 
 <a id="find-post"></a>
 ### \`POST /find\` — Find Email
@@ -260,10 +266,12 @@ Given a name and a domain, generates likely email permutations (15 patterns, LAT
 | \`first_name\` | string | No* | — | |
 | \`last_name\` | string | No* | — | |
 | \`full_name\` | string | No* | — | Parsed with LATAM-aware name-splitting logic. |
+| \`linkedin_url\` | string | No* | — | The person's LinkedIn profile URL. **Pass this whenever you have it** — see above. |
+| \`linkedin_slug\` | string | No* | — | The slug alone, if you don't have the full URL. |
 | \`max_tier\` | number | No | \`2\` | Max verification tier to use (\`1\` or \`2\`). |
 | \`dnc_client\` | string | No | — | Client handle; see [\`dnc_client\` semantics](#dnc-client-semantics). Checked against the request \`domain\` **before** the search runs, and again against the found \`email\` before responding. |
 
-\\* At least one of \`first_name\`, \`last_name\`, \`full_name\` is required.
+\\* At least one of \`first_name\`, \`last_name\`, \`full_name\`, \`linkedin_url\` or \`linkedin_slug\` is required.
 
 **Response — \`200\`**:
 \`\`\`json
@@ -291,12 +299,41 @@ Given a name and a domain, generates likely email permutations (15 patterns, LAT
     "direct_match": null
   },
   "permutations_tried": 1,
+  "identity_source": "linkedin",
+  "surnames_tried": ["garcia", "garcialopez", "lopez"],
   "cost_usd": 0.0004,
   "duration_ms": 983
 }
 \`\`\`
 \`status\`: \`valid\` \\| \`invalid\` \\| \`catch_all\` \\| \`unknown\` \\| \`risky\` \\| \`disposable\` \\| \`no_mx\` \\| \`role_account\`.
-\`method\`: \`local_syntax\` \\| \`local_dns\` \\| \`emaillistverify\` \\| \`debounce\` \\| \`bouncer\` \\| \`neverbounce\` \\| \`serp_pattern\`.
+\`method\`: \`local_syntax\` \\| \`local_dns\` \\| \`emaillistverify\` \\| \`debounce\` \\| \`bouncer\` \\| \`neverbounce\` \\| \`serp_pattern\` \\| \`known_email\` \\| \`domain_pattern\` \\| \`domain_muted\`.
+\`identity_source\`: where the surnames came from — \`linkedin\` (recovered from the slug), \`full_name\`, or \`given\` (the \`last_name\` as sent).
+
+**Reading \`status\` and \`confidence\` together.** \`valid\` means a provider confirmed the mailbox; measured against addresses other providers found for the same people, it is the right address 95.2% of the time. \`catch_all\` means the domain accepts every address, so no probe can confirm one: the address returned is built from the domain's pattern, and \`confidence\` tells you how much evidence that pattern has (\`0.85\` = five or more known addresses at this domain, \`0.45\` = one). Treat \`catch_all\` below \`0.6\` as a lead, not an address.
+
+\`method: "known_email"\` and \`method: "domain_muted"\` both cost \`0\` — the first was answered from the cache, the second refused because the domain has never produced a result.
+
+<a id="find-batch-post"></a>
+### \`POST /find/batch\` — Find Emails (async)
+
+For campaign-sized lists. Returns immediately with a job id instead of holding the connection open; the work then runs at whatever pace the providers allow.
+
+Use this over \`POST /find\` for anything beyond a handful of lookups. A synchronous search that takes 40 minutes has already lost its caller: answers delivered within 30 seconds were stored by the caller 99.3% of the time, answers over an hour only 29.4% — and the work is billed either way.
+
+**Body (JSON)**: \`{ "requests": [ { ...same fields as POST /find, plus an optional "ref" echoed back... } ] }\`. Max 1,000 per job.
+
+**Response — \`202\`**:
+\`\`\`json
+{ "job_id": "0f1c…", "total": 250, "status": "queued", "poll": "/find/batch/0f1c…" }
+\`\`\`
+
+<a id="find-batch-get"></a>
+### \`GET /find/batch/:id\` — Batch status & results
+
+\`\`\`json
+{ "job_id": "0f1c…", "status": "running", "total": 250, "completed": 120 }
+\`\`\`
+\`results\` is present once \`status\` is \`done\`; each entry is a \`/find\` response plus the \`ref\` you sent. \`status\`: \`queued\` \\| \`running\` \\| \`done\` \\| \`failed\`. A job interrupted by a deploy is picked up again on boot and resumes where it stopped.
 
 If \`dnc_client\` was sent and matched, the response is **only** \`{ "do_not_contact": true, "matched_by": "domain" | "email" }\` — no email/cost data leaks. Otherwise the response above gains \`"do_not_contact": false\`.
 

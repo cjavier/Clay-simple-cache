@@ -122,6 +122,18 @@ async function mineEvidence(): Promise<{
  * can tell "12 of 12 mailboxes use first.last" from "3 of 7 do". The old writer
  * stamped every pattern 1.0, which made confidence useless as a ranking signal.
  */
+/**
+ * Single-quote a literal for the batched INSERT.
+ *
+ * Domains and pattern names are both drawn from a closed alphabet — the
+ * pattern from a fixed table, the domain from the right-hand side of an
+ * address — but a value from the database still gets escaped rather than
+ * trusted, since $executeRawUnsafe does no binding of its own.
+ */
+function quote(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
 function confidenceFor(count: number, total: number): number {
   const share = count / total;
   const volume = Math.min(1, count / 5); // 5+ samples = fully trusted
@@ -165,21 +177,34 @@ async function main() {
     return;
   }
 
+  // Written in batches rather than one statement per row: the evidence covers
+  // 52,748 domains, and a round trip each would turn a two-minute job into half
+  // an hour of mostly network latency.
+  const CHUNK = 500;
   let done = 0;
-  for (const w of writes) {
+  for (let i = 0; i < writes.length; i += CHUNK) {
+    const chunk = writes.slice(i, i + CHUNK);
+    const values = chunk
+      .map(
+        (w) =>
+          `(gen_random_uuid(), ${quote(w.domain)}, ${quote(w.pattern)}, ${w.conf}, ${w.n}, now())`
+      )
+      .join(",");
+
     // Mirrors saveDomainPattern's atomic upsert, but sets an absolute
     // sample_count/confidence from the mined evidence instead of incrementing:
     // a backfill re-run must converge, not inflate counts.
-    await prisma.$executeRaw`
+    await prisma.$executeRawUnsafe(`
       INSERT INTO domain_patterns (id, domain, pattern, confidence, sample_count, last_confirmed)
-      VALUES (gen_random_uuid(), ${w.domain}, ${w.pattern}, ${w.conf}, ${w.n}, now())
+      VALUES ${values}
       ON CONFLICT (domain, pattern)
       DO UPDATE SET
-        sample_count = GREATEST(domain_patterns.sample_count, ${w.n}),
-        confidence   = GREATEST(domain_patterns.confidence, ${w.conf}),
+        sample_count = GREATEST(domain_patterns.sample_count, EXCLUDED.sample_count),
+        confidence   = GREATEST(domain_patterns.confidence, EXCLUDED.confidence),
         last_confirmed = now()
-    `;
-    if (++done % 2000 === 0) process.stdout.write(`\r  written ${done}/${upserts}`);
+    `);
+    done += chunk.length;
+    process.stdout.write(`\r  written ${done}/${upserts}`);
   }
   process.stdout.write(`\r  written ${done}/${upserts}\n`);
 
