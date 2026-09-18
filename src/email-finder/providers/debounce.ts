@@ -40,20 +40,41 @@ import { config } from "../config";
 const MAX_CONCURRENT = Number(process.env.DEBOUNCE_MAX_CONCURRENT || 2);
 const MAX_ATTEMPTS = 4;
 
+/**
+ * How many callers may queue for those two slots before Tier 2 is skipped.
+ *
+ * The semaphore was correct; the unbounded queue behind it was not. Two slots
+ * drain roughly two calls a second, so a burst from Clay built a line that grew
+ * faster than it emptied: the median `catch_all` answer took 72 minutes and the
+ * slowest single search took 7h56m. Answers that late are worthless — delivered
+ * under 30s they were used 99.3% of the time, over an hour only 29.4% — so a
+ * call that would wait that long should not be made at all. Past this depth
+ * `acquire()` refuses, the cascade reports `unknown` for that candidate, and the
+ * search finishes on Tier 1 instead of parking behind the queue.
+ */
+const MAX_QUEUE = Number(process.env.DEBOUNCE_MAX_QUEUE || 40);
+
 let active = 0;
 const waiting: (() => void)[] = [];
 
-function acquire(): Promise<void> {
+/** Resolves true when a slot was taken, false when the queue is too deep. */
+function acquire(): Promise<boolean> {
   if (active < MAX_CONCURRENT) {
     active++;
-    return Promise.resolve();
+    return Promise.resolve(true);
   }
-  return new Promise<void>((resolve) => {
+  if (waiting.length >= MAX_QUEUE) return Promise.resolve(false);
+  return new Promise<boolean>((resolve) => {
     waiting.push(() => {
       active++;
-      resolve();
+      resolve(true);
     });
   });
+}
+
+/** How many calls are parked right now — surfaced by /stats. */
+export function debounceQueueDepth(): { active: number; waiting: number; max_queue: number } {
+  return { active, waiting: waiting.length, max_queue: MAX_QUEUE };
 }
 
 function release(): void {
@@ -112,7 +133,13 @@ export class DebounceProvider implements EmailVerificationProvider {
       duration_ms: 0,
     };
 
-    await acquire();
+    const acquired = await acquire();
+    if (!acquired) {
+      // Shed rather than queue. Charging nothing is important: a skipped call
+      // is not a verdict, and billing for one is how a throttled provider used
+      // to report a cost while returning nothing usable.
+      return base;
+    }
     try {
       const url = `https://api.debounce.io/v1/?api=${encodeURIComponent(config.debounce_api_key)}&email=${encodeURIComponent(email)}`;
 

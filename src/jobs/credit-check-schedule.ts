@@ -1,5 +1,6 @@
 import prisma from "../db/prisma";
 import { runCreditCheck } from "./run-credit-check";
+import { runQualityCheck } from "./quality-check";
 
 /**
  * Daily credit check, scheduled inside the API process.
@@ -84,6 +85,21 @@ async function runOnce(reason: string): Promise<void> {
   } catch (e) {
     // The monitor must never take the API down with it.
     console.error("[credit-check] la revisión falló:", e);
+  }
+
+  // Funded and up is not the same as correct and on time. The quality check
+  // rides the same slot so both answers arrive before the day's campaigns.
+  try {
+    const { alertFailed } = await runQualityCheck({
+      log: (l) => console.log(`[quality-check] ${l}`),
+    });
+    if (alertFailed) {
+      console.error(
+        "[quality-check] se detectó un problema y la alerta de Slack NO se entregó"
+      );
+    }
+  } catch (e) {
+    console.error("[quality-check] la revisión falló:", e);
   }
 }
 

@@ -3,20 +3,44 @@ import { findEmail, verifySingleEmail } from "../email-finder";
 import prisma from "../db/prisma";
 import { dncService } from "../services/dnc.service";
 import { resolveClientOr404 } from "./client-resolver";
+import { findJobService, BatchItem } from "../services/find-job.service";
+import { scoreRecentAnswers } from "../services/finder-quality.service";
+import { debounceQueueDepth } from "../email-finder/providers/debounce";
+
+/** Muted domains, or null when the table isn't there yet. */
+async function countMutedDomains(): Promise<number | null> {
+  try {
+    return await prisma.domainHealth.count({
+      where: { muted_until: { gt: new Date() } },
+    });
+  } catch {
+    return null;
+  }
+}
 
 export const emailFinderController = {
   async find(req: Request, res: Response) {
     try {
-      const { first_name, last_name, domain, full_name, max_tier, dnc_client } = req.body;
+      const {
+        first_name,
+        last_name,
+        domain,
+        full_name,
+        linkedin_url,
+        linkedin_slug,
+        max_tier,
+        dnc_client,
+      } = req.body;
 
       if (!domain) {
         res.status(400).json({ error: "domain is required" });
         return;
       }
 
-      if (!first_name && !last_name && !full_name) {
+      if (!first_name && !last_name && !full_name && !linkedin_url && !linkedin_slug) {
         res.status(400).json({
-          error: "At least one of first_name, last_name, or full_name is required",
+          error:
+            "At least one of first_name, last_name, full_name, linkedin_url or linkedin_slug is required",
         });
         return;
       }
@@ -46,6 +70,8 @@ export const emailFinderController = {
         last_name,
         domain,
         full_name,
+        linkedin_url,
+        linkedin_slug,
         max_tier: max_tier || 2,
       });
 
@@ -70,6 +96,8 @@ export const emailFinderController = {
         domain_info: result.domain_info,
         serp_info: result.serp_info,
         permutations_tried: result.permutations_tried,
+        identity_source: result.identity_source,
+        surnames_tried: result.surnames_tried,
         cost_usd: result.cost_usd,
         duration_ms: result.duration_ms,
         ...(dncRequested ? { do_not_contact: false } : {}),
@@ -124,8 +152,82 @@ export const emailFinderController = {
     }
   },
 
-  async stats(_req: Request, res: Response) {
+  /**
+   * Queue a batch of searches and answer immediately with a job id.
+   *
+   * The synchronous endpoint is fine for a handful of lookups. For a campaign
+   * list it loses a race it cannot win: the work gets done and billed whether
+   * or not the caller is still connected, and answers that took over an hour
+   * were used only 29.4% of the time. Here the POST returns in milliseconds.
+   */
+  async createBatch(req: Request, res: Response) {
     try {
+      const { requests } = req.body;
+
+      if (!Array.isArray(requests) || requests.length === 0) {
+        res.status(400).json({ error: "requests must be a non-empty array" });
+        return;
+      }
+      if (requests.length > findJobService.max_batch) {
+        res.status(400).json({
+          error: `requests is limited to ${findJobService.max_batch} items per job`,
+        });
+        return;
+      }
+
+      const invalid = requests.findIndex(
+        (r: BatchItem) =>
+          !r ||
+          !r.domain ||
+          (!r.first_name && !r.last_name && !r.full_name && !r.linkedin_url && !r.linkedin_slug)
+      );
+      if (invalid !== -1) {
+        res.status(400).json({
+          error: `requests[${invalid}] needs a domain and at least one of first_name, last_name, full_name, linkedin_url or linkedin_slug`,
+        });
+        return;
+      }
+
+      const job = await findJobService.create(requests as BatchItem[]);
+      res.status(202).json({
+        job_id: job.id,
+        total: job.total,
+        status: "queued",
+        poll: `/find/batch/${job.id}`,
+      });
+    } catch (error: any) {
+      console.error("Email Finder Batch Error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  },
+
+  async getBatch(req: Request, res: Response) {
+    try {
+      const job = await findJobService.get(req.params.id);
+      if (!job) {
+        res.status(404).json({ error: "job not found" });
+        return;
+      }
+      res.json({
+        job_id: job.id,
+        status: job.status,
+        total: job.total,
+        completed: job.completed,
+        error: job.error,
+        results: job.status === "done" ? job.results : undefined,
+        created_at: job.created_at,
+        updated_at: job.updated_at,
+      });
+    } catch (error: any) {
+      console.error("Email Finder Batch Status Error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  },
+
+  async stats(req: Request, res: Response) {
+    try {
+      const windowDays = Math.min(Number(req.query.window_days) || 7, 90);
+
       const [
         totalSearches,
         validFound,
@@ -134,6 +236,8 @@ export const emailFinderController = {
         domainsCached,
         patternsLearned,
         catchAllCount,
+        mutedDomains,
+        quality,
       ] = await Promise.all([
         prisma.searchLog.count(),
         prisma.searchLog.count({ where: { result_status: "valid" } }),
@@ -146,6 +250,11 @@ export const emailFinderController = {
         prisma.domainIntel.count(),
         prisma.domainPattern.count(),
         prisma.searchLog.count({ where: { result_status: "catch_all" } }),
+        // Both of these are new surfaces. A stats page that 500s because one
+        // extra table isn't migrated yet is worse than a stats page missing one
+        // number, so each degrades to null on its own.
+        countMutedDomains(),
+        scoreRecentAnswers(windowDays).catch(() => null),
       ]);
 
       const methods: Record<string, number> = {};
@@ -158,6 +267,8 @@ export const emailFinderController = {
       res.json({
         total_searches: totalSearches,
         total_valid_found: validFound,
+        // Kept for backwards compatibility, but it measures volume, not
+        // correctness — read `quality.by_status[*].agreement_rate` instead.
         success_rate: totalSearches > 0 ? validFound / totalSearches : 0,
         methods_breakdown: methods,
         total_cost_usd: total,
@@ -165,6 +276,9 @@ export const emailFinderController = {
         domains_in_cache: domainsCached,
         patterns_learned: patternsLearned,
         catch_all_domains: catchAllCount,
+        muted_domains: mutedDomains,
+        debounce_queue: debounceQueueDepth(),
+        quality,
       });
     } catch (error: any) {
       console.error("Email Finder Stats Error:", error);

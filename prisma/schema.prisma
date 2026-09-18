@@ -146,3 +146,62 @@ model ProviderCredit {
   @@index([provider, checked_at])
   @@map("provider_credits")
 }
+
+// ─── Email Finder: caches and guard rails ───────────────────
+
+// SERP results keyed by DOMAIN, not by search.
+//
+// `searchSerpForEmails()` used to run on every single /find call, so 192,986
+// searches over 53,426 distinct domains bought the same Google page 139,560
+// times — $139.56 of duplicate calls — and it ran BEFORE the verification-cache
+// check, so even a free cache hit paid Serper first.
+model SerpCache {
+  id         String   @id @default(uuid()) @db.Uuid
+  domain     String   @unique
+  emails     Json     @default("[]")
+  patterns   Json     @default("[]")
+  checked_at DateTime @default(now()) @db.Timestamptz(6)
+  expires_at DateTime @db.Timestamptz(6)
+
+  @@map("serp_cache")
+}
+
+// Per-domain hit rate, so a domain that never answers stops being asked.
+//
+// 6,889 domains accumulated 14,786 searches and $135.02 without ever returning
+// a single `valid` or `catch_all` — banks and large corporates behind anti-spam
+// gateways, where SMTP probing simply never replies. `muted_until` is a
+// circuit breaker: after MUTE_AFTER consecutive fruitless searches the domain
+// answers `unknown` for free, and re-opens once the mute expires so a domain
+// that changes its mail setup isn't blacklisted forever.
+model DomainHealth {
+  domain      String    @id
+  searches    Int       @default(0)
+  hits        Int       @default(0)
+  last_hit_at DateTime? @db.Timestamptz(6)
+  muted_until DateTime? @db.Timestamptz(6)
+  updated_at  DateTime  @updatedAt @db.Timestamptz(6)
+
+  @@map("domain_health")
+}
+
+// Async batch jobs for /find.
+//
+// A synchronous /find that answers in 40 minutes has already lost its caller:
+// answers delivered under 30s landed in `profiles` 99.3% of the time, answers
+// over an hour only 29.4%. A job the caller polls removes the timeout race
+// entirely — the work is never thrown away because nobody was still listening.
+model FindJob {
+  id         String   @id @default(uuid()) @db.Uuid
+  status     String   @default("queued") // queued | running | done | failed
+  total      Int      @default(0)
+  completed  Int      @default(0)
+  requests   Json     @default("[]")
+  results    Json     @default("[]")
+  error      String?
+  created_at DateTime @default(now()) @db.Timestamptz(6)
+  updated_at DateTime @updatedAt @db.Timestamptz(6)
+
+  @@index([status])
+  @@map("find_jobs")
+}

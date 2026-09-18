@@ -30,6 +30,18 @@ vi.mock("../../src/db/prisma", () => ({
       findUnique: vi.fn(),
       upsert: vi.fn(),
     },
+    domainHealth: {
+      count: vi.fn(),
+      findUnique: vi.fn(),
+    },
+    findJob: {
+      create: vi.fn(),
+      findUnique: vi.fn(),
+      findMany: vi.fn(),
+      update: vi.fn(),
+    },
+    $queryRaw: vi.fn(),
+    $executeRaw: vi.fn(),
     domainPattern: {
       count: vi.fn().mockResolvedValue(0),
       findMany: vi.fn().mockResolvedValue([]),
@@ -75,6 +87,9 @@ describe("API Integration Tests", () => {
     mockPrisma.searchLog.groupBy.mockResolvedValue([]);
     mockPrisma.domainIntel.count.mockResolvedValue(0);
     mockPrisma.domainPattern.count.mockResolvedValue(0);
+    mockPrisma.domainHealth.count.mockResolvedValue(0);
+    mockPrisma.$queryRaw.mockResolvedValue([]);
+    mockPrisma.$executeRaw.mockResolvedValue(0);
   });
 
   describe("GET /health", () => {

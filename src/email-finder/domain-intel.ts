@@ -73,6 +73,13 @@ export async function analyzeDomain(domain: string): Promise<DomainInfo> {
 
   const expiresAt = new Date(Date.now() + config.domain_cache_ttl * 1000);
 
+  // `is_catch_all` is discovered by the verifier, not by DNS — so a refresh of
+  // the MX facts must not erase it. Writing `false` here unconditionally is why
+  // all 63,291 rows in `domain_intel` said `false`: the column existed, was
+  // read by the pipeline, and could never become true. Every search on a known
+  // catch-all domain re-discovered it from scratch, five paid calls at a time.
+  const isCatchAll = cached?.is_catch_all ?? false;
+
   // 7. Cache in DB (upsert)
   await prisma.domainIntel.upsert({
     where: { domain },
@@ -80,7 +87,6 @@ export async function analyzeDomain(domain: string): Promise<DomainInfo> {
       has_mx: hasMx,
       mx_records: mxRecords,
       provider,
-      is_catch_all: false,
       is_disposable: isDisposable,
       is_free_provider: isFreeProvider,
       checked_at: new Date(),
@@ -104,9 +110,29 @@ export async function analyzeDomain(domain: string): Promise<DomainInfo> {
     has_mx: hasMx,
     mx_records: mxRecords,
     provider,
-    is_catch_all: false,
+    is_catch_all: isCatchAll,
     is_disposable: isDisposable,
     is_free_provider: isFreeProvider,
     smtp_verifiable: smtpVerifiable,
   };
+}
+
+/**
+ * Persist what the verifier just told us about the domain.
+ *
+ * Called the first time a candidate at this domain comes back `catch_all`.
+ * From then on the pipeline knows, before spending anything, that probing
+ * individual addresses here cannot discriminate — a catch-all server accepts
+ * every local part by definition — and goes straight to the domain's pattern
+ * instead of buying five identical "yes".
+ */
+export async function markDomainCatchAll(domain: string): Promise<void> {
+  try {
+    await prisma.domainIntel.updateMany({
+      where: { domain },
+      data: { is_catch_all: true },
+    });
+  } catch {
+    // Learning is a side effect; never fail a search over it.
+  }
 }

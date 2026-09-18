@@ -26,6 +26,11 @@ router.get('/companies', authMiddleware, companiesController.get);
 
 // Email Finder
 router.post('/find', authMiddleware, emailFinderController.find);
+// Batch find as a polled job. Registered before /find so the rate limiter's
+// COSTLY_PATHS prefix match still covers it, and so a single POST can enqueue
+// a campaign list without holding an HTTP connection open for its duration.
+router.post('/find/batch', authMiddleware, emailFinderController.createBatch);
+router.get('/find/batch/:id', authMiddleware, emailFinderController.getBatch);
 router.post('/verify', authMiddleware, emailFinderController.verify);
 router.get('/stats', authMiddleware, emailFinderController.stats);
 

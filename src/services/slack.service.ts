@@ -218,3 +218,42 @@ export function shouldNotify(
 
 /** Exported for tests only. */
 export const __testWord = word;
+
+/**
+ * Post an arbitrary message to the alert channel.
+ *
+ * `sendCreditAlert` owns the credit-report layout; this is the plain door for
+ * other monitors (the finder quality check) so they don't each grow their own
+ * copy of the fetch, the timeout and the error handling.
+ */
+export async function postSlackMessage(
+  text: string,
+  blocks?: unknown[],
+  opts: { channel?: string; token?: string } = {}
+): Promise<{ ok: boolean; error?: string; ts?: string }> {
+  const token = opts.token ?? process.env.SLACK_TOKEN ?? "";
+  const channel = opts.channel ?? process.env.SLACK_ALERT_CHANNEL ?? "";
+  if (!token) return { ok: false, error: "SLACK_TOKEN no configurado" };
+  if (!channel) return { ok: false, error: "SLACK_ALERT_CHANNEL no configurado" };
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  try {
+    const res = await fetch(SLACK_API, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json; charset=utf-8",
+      },
+      body: JSON.stringify({ channel, text, ...(blocks ? { blocks } : {}) }),
+      signal: controller.signal,
+    });
+    const json: any = await res.json().catch(() => null);
+    if (!json?.ok) return { ok: false, error: json?.error || `HTTP ${res.status}` };
+    return { ok: true, ts: json.ts };
+  } catch (e: any) {
+    return { ok: false, error: e?.message || "fetch falló" };
+  } finally {
+    clearTimeout(timer);
+  }
+}

@@ -9,22 +9,31 @@ import {
   SerpInfo,
   CONCLUSIVE_STATUSES,
 } from "./types";
-import { analyzeDomain } from "./domain-intel";
+import { analyzeDomain, markDomainCatchAll } from "./domain-intel";
 import {
   normalizeName,
-  normalizeNameKeepingSpaces,
-  parseFullName,
-  generatePermutations,
-  generatePermutationsFromFullName,
+  generateCandidates,
   prioritizePermutations,
   identifyPattern,
+  identifyPatternForSurnames,
+  KnownPattern,
 } from "./permutator";
+import { resolveIdentity, ResolvedIdentity } from "./identity";
 import {
   getCachedVerification,
   getCachedVerificationsBatch,
   cacheVerification,
+  cacheNegativeVerifications,
 } from "./cache";
 import { saveDomainPattern, getDomainPatterns } from "./pattern-learner";
+import {
+  getKnownEmailsForDomain,
+  matchPerson,
+  KnownEmail,
+} from "./known-emails";
+import { getCachedSerp, cacheSerp } from "./serp-cache";
+import { checkDomainHealth, recordDomainOutcome } from "./domain-health";
+import { normalizeDomain } from "../services/normalization";
 import { EmailListVerifyProvider } from "./providers/emaillistverify";
 import { DebounceProvider } from "./providers/debounce";
 import {
@@ -60,7 +69,7 @@ const TIERS: EmailVerificationProvider[][] = [
  *
  * Tier 2 (DeBounce) caps concurrent calls per ACCOUNT. On a domain where Tier 1
  * can't conclude anything — a mailbox behind an anti-spam gateway answers
- * `antispam_system` for every permutation — all 15 candidates escalated, and
+ * `antispam_system` for every permutation — all candidates escalated, and
  * between this process and the deployed service that saturated the account and
  * came back as HTTP 429. Throttled calls look exactly like undeliverable
  * addresses, so the fan-out was actively producing wrong answers.
@@ -68,15 +77,36 @@ const TIERS: EmailVerificationProvider[][] = [
  * Escalating every candidate was never useful anyway: if Tier 1 can't see the
  * domain, asking Tier 2 about the 12th-most-likely spelling is noise. The budget
  * spends Tier 2 on the most likely candidates, which are first in the list.
- * Tier 1 coverage is untouched — every permutation is still checked there.
+ * Tier 1 coverage is untouched — every candidate is still checked there.
  */
 interface TierBudget {
   remaining: number;
 }
 
 const TIER2_BUDGET_PER_SEARCH = Number(
-  process.env.TIER2_BUDGET_PER_SEARCH || 5
+  process.env.TIER2_BUDGET_PER_SEARCH || 2
 );
+
+/**
+ * A wall-clock deadline carried through one search.
+ *
+ * Without it a search has no upper bound at all: Express sets no timeout, so the
+ * process kept verifying candidates for a caller that had hung up 40 minutes
+ * earlier. 86% of four weeks of spend went to searches that answered after two
+ * minutes, and 70% of the answers that took over an hour were never used.
+ */
+class Deadline {
+  readonly at: number;
+  constructor(budgetMs: number) {
+    this.at = Date.now() + budgetMs;
+  }
+  get expired(): boolean {
+    return Date.now() >= this.at;
+  }
+  get remaining(): number {
+    return Math.max(0, this.at - Date.now());
+  }
+}
 
 async function apiCascade(
   email: string,
@@ -147,42 +177,145 @@ async function apiCascadeParallel(
   return results;
 }
 
+/**
+ * Read the domain's mailbox convention out of addresses we already own.
+ *
+ * `profiles` holds 168,523 real addresses. Leave-one-out over that table — hide
+ * one address, predict its pattern from the rest of its domain, compare —
+ * lands on the right pattern 81.5% of the time, and 47.3% of recent searches
+ * are on a domain with at least three known addresses. That is the single
+ * cheapest signal available to this service, and it was never read: the
+ * catch-all branch guessed instead, and got the address right 33.3% of the time.
+ */
+function inferPatternsFromKnownEmails(known: KnownEmail[]): KnownPattern[] {
+  const tally = new Map<string, number>();
+
+  for (const row of known) {
+    const surnames = [
+      ...(row.last ? [row.last] : []),
+      ...row.slug_parts.slice(1),
+      ...(row.slug_parts.length >= 3
+        ? [row.slug_parts.slice(1).join("")]
+        : []),
+    ];
+    const first = row.slug_parts[0] || row.first;
+    if (!first || surnames.length === 0) continue;
+
+    const pattern = identifyPatternForSurnames(row.email, first, surnames);
+    if (pattern) tally.set(pattern, (tally.get(pattern) || 0) + 1);
+  }
+
+  return [...tally.entries()]
+    .map(([pattern, sample_count]) => ({
+      pattern,
+      // Evidence from our own verified mail beats a pattern glimpsed once in a
+      // search-engine snippet, but one sample is still one sample.
+      confidence: Math.min(1, 0.6 + sample_count * 0.1),
+      sample_count,
+    }))
+    .sort((a, b) => b.sample_count - a.sample_count);
+}
+
+/** Merge pattern evidence from several sources, strongest first. */
+function mergePatterns(...sources: KnownPattern[][]): KnownPattern[] {
+  const merged = new Map<string, KnownPattern>();
+  for (const list of sources) {
+    for (const p of list) {
+      const existing = merged.get(p.pattern);
+      if (!existing) {
+        merged.set(p.pattern, { ...p });
+      } else {
+        existing.sample_count += p.sample_count;
+        existing.confidence = Math.max(existing.confidence, p.confidence);
+      }
+    }
+  }
+  return [...merged.values()].sort(
+    (a, b) => b.sample_count - a.sample_count || b.confidence - a.confidence
+  );
+}
+
+/** The first candidate that spells the person's name under `pattern`. */
+function candidateForPattern(
+  candidates: string[],
+  pattern: string,
+  identity: ResolvedIdentity
+): string | null {
+  for (const email of candidates) {
+    for (const surname of identity.surnames) {
+      if (identifyPattern(email, identity.first, surname) === pattern) {
+        return email;
+      }
+    }
+  }
+  return null;
+}
+
 export async function findEmail(request: FindRequest): Promise<VerificationResult> {
   const start = Date.now();
+  const deadline = new Deadline(
+    request.time_budget_ms || config.find_time_budget_ms
+  );
   let totalCost = 0;
   let permutationsTried = 0;
   let apiCalls = 0;
 
-  // ── 1. Parse name ──
-  let first = request.first_name || "";
-  let last = request.last_name || "";
-
-  if (request.full_name && !(first && last)) {
-    [first, last] = parseFullName(request.full_name);
-  } else if (request.full_name && request.full_name.split(" ").length >= 3) {
-    const [, parsedLast] = parseFullName(request.full_name);
-    if (parsedLast && normalizeName(parsedLast) !== normalizeName(last)) {
-      last = parsedLast;
-    }
+  // ── 1. Normalize the domain ──
+  // `/find` used to do nothing but trim+lowercase here, while the company
+  // normalizer stripped protocol, www and path. That gap cost 355 searches and
+  // $8.05 against the host "www.gob.pe", which has no mailboxes at all.
+  const domain = normalizeDomain(request.domain || "");
+  if (!domain) {
+    return makeResult({
+      status: EmailStatus.invalid,
+      confidence: 1,
+      method: VerificationMethod.local_syntax,
+      duration_ms: Date.now() - start,
+    });
   }
 
-  // ── 2. Normalize ──
-  // Keep word boundaries: the variant builders in permutator.ts split compound
-  // surnames themselves, and stripping spaces here made that path unreachable.
-  first = normalizeNameKeepingSpaces(first);
-  last = normalizeNameKeepingSpaces(last);
-  const domain = request.domain.trim().toLowerCase();
+  // ── 2. Work out whose name we are actually spelling ──
+  const identity = resolveIdentity(request);
+  const first = identity.first;
+  const last = identity.given_last;
   const maxTier = Math.min(request.max_tier || 2, 2); // Cap at 2 (no Tier 3 yet)
 
-  // ── 3. Domain analysis ──
+  const identityInfo = {
+    identity_source: identity.source,
+    surnames_tried: identity.surnames,
+  };
+
+  if (!first && identity.surnames.length === 0) {
+    return makeResult({
+      status: EmailStatus.invalid,
+      confidence: 1,
+      method: VerificationMethod.local_syntax,
+      duration_ms: Date.now() - start,
+      ...identityInfo,
+    });
+  }
+
+  // ── 3. Circuit breaker ──
+  const health = await checkDomainHealth(domain);
+  if (health.muted) {
+    await logSearch(first, last, domain, null, "unknown", VerificationMethod.domain_muted, 0, 0, 0, Date.now() - start);
+    return makeResult({
+      status: EmailStatus.unknown,
+      method: VerificationMethod.domain_muted,
+      duration_ms: Date.now() - start,
+      ...identityInfo,
+    });
+  }
+
+  // ── 4. Domain analysis and early exits ──
   const domainInfo = await analyzeDomain(domain);
 
-  // ── 4. Early exits ──
   if (!domainInfo.has_mx) {
     return makeResult({
       status: EmailStatus.no_mx,
       domain_info: domainInfo,
       duration_ms: Date.now() - start,
+      ...identityInfo,
     });
   }
   if (domainInfo.is_disposable) {
@@ -190,91 +323,58 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
       status: EmailStatus.disposable,
       domain_info: domainInfo,
       duration_ms: Date.now() - start,
+      ...identityInfo,
     });
   }
 
-  // ── 5. Generate permutations ──
-  let permutations = generatePermutations(first, last, domain);
+  // ── 5. Everything we already own about this domain (one indexed query) ──
+  const knownEmails = await getKnownEmailsForDomain(domain);
 
-  if (request.full_name) {
-    const extras = generatePermutationsFromFullName(request.full_name, domain);
-    const seen = new Set(permutations);
-    for (const e of extras) {
-      if (!seen.has(e)) {
-        seen.add(e);
-        permutations.push(e);
-      }
-    }
+  // 5a. Do we already have this exact person? 7.4% of past searches were for
+  // someone whose address was already sitting in `profiles`.
+  const alreadyKnown = matchPerson(knownEmails, first, identity.surnames);
+  if (alreadyKnown) {
+    const pattern = identifyPatternForSurnames(alreadyKnown.email, first, identity.surnames);
+    await recordDomainOutcome(domain, true);
+    await logSearch(first, last, domain, alreadyKnown.email, "valid", VerificationMethod.known_email, 0, 0, 0, Date.now() - start);
+    return makeResult({
+      email: alreadyKnown.email,
+      status: EmailStatus.valid,
+      confidence: 0.95,
+      method: VerificationMethod.known_email,
+      pattern,
+      domain_info: domainInfo,
+      duration_ms: Date.now() - start,
+      ...identityInfo,
+    });
   }
 
-  // Apply known domain patterns (from DB)
-  const knownPatterns = await getDomainPatterns(domain);
-  permutations = prioritizePermutations(permutations, knownPatterns, first, last);
+  // ── 6. Candidates, ordered by what this domain is known to do ──
+  let candidates = generateCandidates(
+    first,
+    identity.surnames,
+    domain,
+    identity.second_given
+  );
 
-  // ── 5b. SERP pattern discovery ──
-  // Search Google for "@domain.com" to find real emails and identify the domain's pattern.
-  // This runs before API validation to inform permutation priority.
-  const serpResult = await searchSerpForEmails(domain);
-  totalCost += serpResult.cost_usd;
+  const dbPatterns = await getDomainPatterns(domain);
+  const inferredPatterns = inferPatternsFromKnownEmails(knownEmails);
+  let patterns = mergePatterns(inferredPatterns, dbPatterns);
+  candidates = prioritizePermutations(candidates, patterns, first, last);
 
-  let serpPatterns: { pattern: string; count: number; examples: string[] }[] = [];
-  let serpDirectMatch: string | null = null;
-  const serpUsed = !!config.serper_api_key;
+  const strongPattern =
+    patterns.length > 0 &&
+    patterns[0].sample_count >= config.pattern_confidence_samples
+      ? patterns[0]
+      : null;
 
-  if (serpResult.emails.length > 0) {
-    serpPatterns = identifyPatternsFromEmails(serpResult.emails);
-
-    // Check if any SERP email is an exact match for our target person
-    for (const serpEmail of serpResult.emails) {
-      if (permutations.includes(serpEmail)) {
-        serpDirectMatch = serpEmail;
-        break;
-      }
-    }
-
-    // Re-prioritize permutations based on SERP-discovered patterns
-    if (serpPatterns.length > 0) {
-      const serpKnownPatterns = serpPatterns.map((sp) => ({
-        pattern: sp.pattern,
-        confidence: Math.min(1.0, 0.7 + sp.count * 0.1),
-        sample_count: sp.count,
-      }));
-
-      // Merge SERP patterns with DB patterns (SERP takes priority for ordering)
-      const mergedPatterns = [...serpKnownPatterns];
-      for (const dbp of knownPatterns) {
-        if (!mergedPatterns.find((p) => p.pattern === dbp.pattern)) {
-          mergedPatterns.push(dbp);
-        }
-      }
-
-      permutations = prioritizePermutations(permutations, mergedPatterns, first, last);
-
-      // Save SERP-discovered patterns to DB for future lookups (parallel — each
-      // pattern is a distinct (domain, pattern) row, so writes are independent).
-      await Promise.all(
-        serpPatterns.map((sp) => saveDomainPattern(domain, sp.pattern))
-      );
-    }
-  }
-
-  permutations = permutations.slice(0, config.max_permutations_to_try);
-
-  // Build SERP tracing info for the response
-  const serpInfo: SerpInfo = {
-    used: serpUsed,
-    emails_found: serpResult.emails.length,
-    patterns_detected: serpPatterns,
-    direct_match: serpDirectMatch,
-  };
-
-  // ── 6. Cache check (single batch query, then pick the first hit in
-  // permutation priority order to preserve the previous serial semantics) ──
-  const cachedByEmail = await getCachedVerificationsBatch(permutations);
-  for (const email of permutations) {
+  // ── 7. Verification cache ──
+  const cachedByEmail = await getCachedVerificationsBatch(candidates);
+  for (const email of candidates) {
     const cached = cachedByEmail.get(email);
     if (cached?.status === EmailStatus.valid) {
-      const pattern = identifyPattern(email, first, last);
+      const pattern = identifyPatternForSurnames(email, first, identity.surnames);
+      await recordDomainOutcome(domain, true);
       return makeResult({
         email,
         status: EmailStatus.valid,
@@ -282,75 +382,158 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
         method: cached.method,
         pattern,
         domain_info: domainInfo,
-        serp_info: serpInfo,
         permutations_tried: 0,
-        cost_usd: totalCost,
+        cost_usd: 0,
         duration_ms: Date.now() - start,
+        ...identityInfo,
       });
     }
   }
 
-  // ── 6b. SERP direct match shortcut ──
-  // If SERP found an exact email matching one of our permutations,
-  // validate it directly first (single API call instead of batch scanning).
-  if (serpDirectMatch) {
-    const validation = await apiCascade(serpDirectMatch, maxTier);
+  // Candidates we already know are dead cost nothing to skip. This is the
+  // payoff of caching negatives: 20.1% of searches repeat a person+domain.
+  const untried = candidates.filter((email) => {
+    const cached = cachedByEmail.get(email);
+    return !cached || cached.status === EmailStatus.catch_all;
+  });
+
+  // ── 8. Known catch-all domain: probing cannot discriminate ──
+  // A catch-all server accepts every local part, so buying five identical
+  // "yes" answers tells us nothing the domain record already said. The pattern
+  // is the only real signal here, and it is right 81.5% of the time.
+  if (domainInfo.is_catch_all && patterns.length > 0) {
+    const best =
+      candidateForPattern(candidates, patterns[0].pattern, identity) ||
+      candidates[0];
+    const pattern = identifyPatternForSurnames(best, first, identity.surnames);
+    const confidence = confidenceForPattern(patterns[0]);
+    await recordDomainOutcome(domain, true);
+    await logSearch(first, last, domain, best, "catch_all", VerificationMethod.domain_pattern, 0, 0, 0, Date.now() - start);
+    return makeResult({
+      email: best,
+      status: EmailStatus.catch_all,
+      confidence,
+      method: VerificationMethod.domain_pattern,
+      pattern,
+      domain_info: domainInfo,
+      duration_ms: Date.now() - start,
+      ...identityInfo,
+    });
+  }
+
+  // ── 9. Strong pattern: verify exactly one address ──
+  if (strongPattern && untried.length > 0 && !deadline.expired) {
+    const single =
+      candidateForPattern(untried, strongPattern.pattern, identity) || untried[0];
+    const verdict = await apiCascade(single, maxTier);
     permutationsTried++;
     apiCalls++;
-    totalCost += validation.cost_usd;
+    totalCost += verdict.cost_usd;
 
-    if (validation.status === EmailStatus.valid) {
-      const pattern = identifyPattern(serpDirectMatch, first, last);
-      if (pattern) await saveDomainPattern(domain, pattern);
-      await cacheVerification(serpDirectMatch, "valid", 0.99, VerificationMethod.serp_pattern);
-      await logSearch(first, last, domain, serpDirectMatch, "valid", VerificationMethod.serp_pattern, permutationsTried, apiCalls, totalCost, Date.now() - start);
-      return makeResult({
-        email: serpDirectMatch,
-        status: EmailStatus.valid,
-        confidence: 0.99,
-        method: VerificationMethod.serp_pattern,
-        pattern,
-        domain_info: domainInfo,
-        serp_info: serpInfo,
-        permutations_tried: permutationsTried,
-        cost_usd: totalCost,
-        duration_ms: Date.now() - start,
-      });
+    if (verdict.status === EmailStatus.valid) {
+      return await concludeValid(
+        single, verdict, first, last, identity, domain, domainInfo, null,
+        permutationsTried, apiCalls, totalCost, start, identityInfo
+      );
     }
-
-    // If catch-all, the SERP match is still our best guess — handle below
-    if (validation.status === EmailStatus.catch_all) {
-      const pattern = identifyPattern(serpDirectMatch, first, last);
-      // SERP found this email publicly + domain is catch-all = high confidence
-      const confidence = 0.85;
-      await cacheVerification(serpDirectMatch, "catch_all", confidence, VerificationMethod.serp_pattern);
-      await logSearch(first, last, domain, serpDirectMatch, "catch_all", VerificationMethod.serp_pattern, permutationsTried, apiCalls, totalCost, Date.now() - start);
+    if (verdict.status === EmailStatus.catch_all) {
+      await markDomainCatchAll(domain);
+      const pattern = identifyPatternForSurnames(single, first, identity.surnames);
+      await recordDomainOutcome(domain, true);
+      await cacheVerification(single, "catch_all", confidenceForPattern(strongPattern), VerificationMethod.domain_pattern);
+      await logSearch(first, last, domain, single, "catch_all", VerificationMethod.domain_pattern, permutationsTried, apiCalls, totalCost, Date.now() - start);
       return makeResult({
-        email: serpDirectMatch,
+        email: single,
         status: EmailStatus.catch_all,
-        confidence,
-        method: VerificationMethod.serp_pattern,
+        confidence: confidenceForPattern(strongPattern),
+        method: VerificationMethod.domain_pattern,
         pattern,
         domain_info: domainInfo,
-        serp_info: serpInfo,
         permutations_tried: permutationsTried,
         cost_usd: totalCost,
         duration_ms: Date.now() - start,
+        ...identityInfo,
       });
     }
 
-    // Remove from permutations list so we don't re-test it
-    permutations = permutations.filter((p) => p !== serpDirectMatch);
+    // The pattern's spelling is dead — fall through to the scan, minus this one.
+    await cacheNegativeVerifications([
+      { email: single, status: verdict.status, confidence: verdict.confidence, method: verdict.method },
+    ]);
+    const idx = untried.indexOf(single);
+    if (idx >= 0) untried.splice(idx, 1);
   }
 
-  // ── 7. API cascade with parallelization ──
+  // ── 10. SERP, cached by domain ──
+  // Only worth buying when we have no pattern of our own. It used to run on
+  // every search, ahead of the cache check, so even a free cache hit paid it.
+  let serpPatterns: { pattern: string; count: number; examples: string[] }[] = [];
+  let serpDirectMatch: string | null = null;
+  let serpEmailsFound = 0;
+  const serpUsed = !!config.serper_api_key;
+
+  if (!strongPattern && untried.length > 0 && !deadline.expired) {
+    const cached = await getCachedSerp(domain);
+    let serpEmails: string[];
+
+    if (cached) {
+      serpEmails = cached.emails;
+      serpPatterns = cached.patterns;
+    } else {
+      const serpResult = await searchSerpForEmails(domain);
+      totalCost += serpResult.cost_usd;
+      serpEmails = serpResult.emails;
+      serpPatterns =
+        serpEmails.length > 0 ? identifyPatternsFromEmails(serpEmails) : [];
+      await cacheSerp(domain, serpEmails, serpPatterns);
+    }
+
+    serpEmailsFound = serpEmails.length;
+    for (const serpEmail of serpEmails) {
+      if (candidates.includes(serpEmail)) {
+        serpDirectMatch = serpEmail;
+        break;
+      }
+    }
+
+    if (serpPatterns.length > 0) {
+      const asKnown: KnownPattern[] = serpPatterns.map((sp) => ({
+        pattern: sp.pattern,
+        confidence: Math.min(1.0, 0.7 + sp.count * 0.1),
+        sample_count: sp.count,
+      }));
+      patterns = mergePatterns(patterns, asKnown);
+      await Promise.all(
+        serpPatterns.map((sp) => saveDomainPattern(domain, sp.pattern))
+      );
+    }
+  }
+
+  const serpInfo: SerpInfo = {
+    used: serpUsed,
+    emails_found: serpEmailsFound,
+    patterns_detected: serpPatterns,
+    direct_match: serpDirectMatch,
+  };
+
+  // A SERP hit that spells this exact person is worth jumping the queue for.
+  let toTry = prioritizePermutations(untried, patterns, first, last);
+  if (serpDirectMatch && toTry.includes(serpDirectMatch)) {
+    toTry = [serpDirectMatch, ...toTry.filter((e) => e !== serpDirectMatch)];
+  }
+  toTry = toTry.slice(0, config.max_permutations_to_try);
+
+  // ── 11. Verify the short list ──
   let riskyCandidate: VerificationResult | null = null;
-  let catchAllCandidate: VerificationResult | null = null;
+  let catchAllCandidate: { email: string; result: VerificationResult } | null = null;
+  const negatives: { email: string; status: EmailStatus; confidence: number; method: string | null }[] = [];
   const BATCH_SIZE = 5;
   const tier2Budget: TierBudget = { remaining: TIER2_BUDGET_PER_SEARCH };
 
-  for (let i = 0; i < permutations.length; i += BATCH_SIZE) {
-    const batch = permutations.slice(i, i + BATCH_SIZE);
+  for (let i = 0; i < toTry.length; i += BATCH_SIZE) {
+    if (deadline.expired) break;
+
+    const batch = toTry.slice(i, i + BATCH_SIZE);
     const results = await apiCascadeParallel(batch, maxTier, BATCH_SIZE, tier2Budget);
 
     permutationsTried += batch.length;
@@ -362,73 +545,70 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
       const email = batch[j];
 
       if (result.status === EmailStatus.valid) {
-        const pattern = identifyPattern(email, first, last);
-        if (pattern) await saveDomainPattern(domain, pattern);
-        await cacheVerification(email, "valid", result.confidence, result.method);
-        await logSearch(first, last, domain, email, "valid", result.method, permutationsTried, apiCalls, totalCost, Date.now() - start);
-        return makeResult({
-          email,
-          status: EmailStatus.valid,
-          confidence: result.confidence,
-          method: result.method,
-          pattern,
-          domain_info: domainInfo,
-          serp_info: serpInfo,
-          permutations_tried: permutationsTried,
-          cost_usd: totalCost,
-          duration_ms: Date.now() - start,
-        });
+        await cacheNegativeVerifications(negatives);
+        return await concludeValid(
+          email, result, first, last, identity, domain, domainInfo, serpInfo,
+          permutationsTried, apiCalls, totalCost, start, identityInfo
+        );
       }
 
       if (result.status === EmailStatus.catch_all && !catchAllCandidate) {
-        // For catch-all: use SERP pattern if available, otherwise first permutation
-        const bestEmail = pickBestCatchAllEmail(
-          permutations, first, last, domain, serpPatterns
-        );
-        const pattern = identifyPattern(bestEmail, first, last);
-        // Confidence: higher if SERP corroborates the pattern
-        const serpBoost = serpPatterns.length > 0 && pattern &&
-          serpPatterns.some((sp) => sp.pattern === pattern);
-        const confidence = serpBoost ? 0.75 : 0.5;
-
-        catchAllCandidate = makeResult({
-          email: bestEmail,
-          status: EmailStatus.catch_all,
-          confidence,
-          method: serpBoost ? VerificationMethod.serp_pattern : result.method,
-          pattern,
-          domain_info: domainInfo,
-          serp_info: serpInfo,
-        });
-      }
-
-      if (result.status === EmailStatus.risky && !riskyCandidate) {
-        riskyCandidate = makeResult({
+        catchAllCandidate = { email, result };
+      } else if (result.status === EmailStatus.risky && !riskyCandidate) {
+        riskyCandidate = result;
+      } else {
+        negatives.push({
           email,
-          status: EmailStatus.risky,
+          status: result.status,
           confidence: result.confidence,
           method: result.method,
-          domain_info: domainInfo,
         });
       }
     }
 
-    // If catch-all detected, validate best guess with Debounce for extra signal
-    if (catchAllCandidate) {
-      const finalResult = await validateCatchAllWithDebounce(
-        catchAllCandidate, permutationsTried, apiCalls, totalCost, start,
-        first, last, domain
-      );
-      totalCost = finalResult.cost_usd;
-      await logSearch(first, last, domain, finalResult.email, finalResult.status, finalResult.method, finalResult.permutations_tried, apiCalls, totalCost, Date.now() - start);
-      return finalResult;
-    }
+    // Catch-all is a property of the domain, not of this address: once seen,
+    // scanning more candidates cannot tell them apart. Record it and answer
+    // from the pattern.
+    if (catchAllCandidate) break;
   }
 
-  // ── 8. Return best available ──
+  await cacheNegativeVerifications(negatives);
+
+  // ── 12. Catch-all: answer from the pattern, not from the probe ──
+  if (catchAllCandidate) {
+    await markDomainCatchAll(domain);
+
+    const top = patterns[0] || null;
+    const best =
+      (top && candidateForPattern(toTry, top.pattern, identity)) ||
+      catchAllCandidate.email;
+    const pattern = identifyPatternForSurnames(best, first, identity.surnames);
+    const confidence = top ? confidenceForPattern(top) : 0.4;
+
+    await cacheVerification(best, "catch_all", confidence, VerificationMethod.domain_pattern);
+    await recordDomainOutcome(domain, true);
+    await logSearch(first, last, domain, best, "catch_all", VerificationMethod.domain_pattern, permutationsTried, apiCalls, totalCost, Date.now() - start);
+    return makeResult({
+      email: best,
+      status: EmailStatus.catch_all,
+      confidence,
+      method: VerificationMethod.domain_pattern,
+      pattern,
+      domain_info: domainInfo,
+      serp_info: serpInfo,
+      permutations_tried: permutationsTried,
+      cost_usd: totalCost,
+      duration_ms: Date.now() - start,
+      ...identityInfo,
+    });
+  }
+
+  // ── 13. Nothing conclusive ──
+  await recordDomainOutcome(domain, false);
+
   if (riskyCandidate) {
     await logSearch(first, last, domain, riskyCandidate.email, "risky", riskyCandidate.method, permutationsTried, apiCalls, totalCost, Date.now() - start);
-    return { ...riskyCandidate, serp_info: serpInfo, duration_ms: Date.now() - start, cost_usd: totalCost };
+    return { ...riskyCandidate, serp_info: serpInfo, duration_ms: Date.now() - start, cost_usd: totalCost, ...identityInfo };
   }
 
   await logSearch(first, last, domain, null, "unknown", null, permutationsTried, apiCalls, totalCost, Date.now() - start);
@@ -439,6 +619,59 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
     permutations_tried: permutationsTried,
     cost_usd: totalCost,
     duration_ms: Date.now() - start,
+    ...identityInfo,
+  });
+}
+
+/**
+ * Confidence for an address we built from a pattern rather than confirmed.
+ *
+ * Anchored on the leave-one-out measurement: with three or more samples the
+ * domain's dominant pattern picks the right address 81.5% of the time. Thinner
+ * evidence gets a lower number rather than the same optimistic one, so a
+ * downstream filter on confidence actually separates the two.
+ */
+function confidenceForPattern(pattern: KnownPattern): number {
+  if (pattern.sample_count >= 5) return 0.85;
+  if (pattern.sample_count >= 3) return 0.8;
+  if (pattern.sample_count === 2) return 0.6;
+  return 0.45;
+}
+
+/** Shared tail for "we confirmed this address": learn, cache, log, return. */
+async function concludeValid(
+  email: string,
+  result: VerificationResult,
+  first: string,
+  last: string,
+  identity: ResolvedIdentity,
+  domain: string,
+  domainInfo: VerificationResult["domain_info"],
+  serpInfo: SerpInfo | null,
+  permutationsTried: number,
+  apiCalls: number,
+  totalCost: number,
+  start: number,
+  identityInfo: Record<string, unknown>
+): Promise<VerificationResult> {
+  const pattern = identifyPatternForSurnames(email, first, identity.surnames);
+  if (pattern) await saveDomainPattern(domain, pattern);
+  await cacheVerification(email, "valid", result.confidence, result.method);
+  await recordDomainOutcome(domain, true);
+  await logSearch(first, last, domain, email, "valid", result.method, permutationsTried, apiCalls, totalCost, Date.now() - start);
+
+  return makeResult({
+    email,
+    status: EmailStatus.valid,
+    confidence: result.confidence,
+    method: result.method,
+    pattern,
+    domain_info: domainInfo,
+    serp_info: serpInfo,
+    permutations_tried: permutationsTried,
+    cost_usd: totalCost,
+    duration_ms: Date.now() - start,
+    ...identityInfo,
   });
 }
 
@@ -496,9 +729,13 @@ export async function verifySingleEmail(
   const cappedTier = Math.min(maxTier, 2); // No Tier 3 yet
   const result = await apiCascade(email, cappedTier);
 
-  // 5. Cache and return
+  // 5. Cache and return. Every verdict is kept now, not just the good ones:
+  // an `invalid` we paid for is worth exactly as much as a `valid` next time.
   if (result.status !== EmailStatus.unknown) {
     await cacheVerification(email, result.status, result.confidence, result.method);
+  }
+  if (result.status === EmailStatus.catch_all) {
+    await markDomainCatchAll(domain);
   }
 
   return makeResult({
@@ -510,86 +747,6 @@ export async function verifySingleEmail(
     cost_usd: result.cost_usd,
     duration_ms: Date.now() - start,
   });
-}
-
-/**
- * For catch-all domains, pick the best email based on SERP-discovered patterns.
- * If SERP found a pattern, use it to build the email. Otherwise fall back to first permutation.
- */
-function pickBestCatchAllEmail(
-  permutations: string[],
-  first: string,
-  last: string,
-  domain: string,
-  serpPatterns: { pattern: string; count: number; examples: string[] }[]
-): string {
-  if (serpPatterns.length === 0 || permutations.length === 0) {
-    return permutations[0] || `${first}.${last}@${domain}`;
-  }
-
-  // The top SERP pattern is the most likely format for this domain
-  const topPattern = serpPatterns[0].pattern;
-
-  // Find the permutation that matches this pattern
-  for (const email of permutations) {
-    const pattern = identifyPattern(email, first, last);
-    if (pattern === topPattern) return email;
-  }
-
-  // Fallback to first permutation (already prioritized by patterns)
-  return permutations[0];
-}
-
-/**
- * For catch-all domains: if Tier 1 (EmailListVerify) said catch-all,
- * cross-validate with Debounce to see if it can give a more definitive answer.
- * Debounce sometimes distinguishes valid from catch-all more accurately.
- */
-async function validateCatchAllWithDebounce(
-  catchAllCandidate: VerificationResult,
-  permutationsTried: number,
-  apiCalls: number,
-  totalCost: number,
-  start: number,
-  first: string,
-  last: string,
-  domain: string
-): Promise<VerificationResult> {
-  const email = catchAllCandidate.email;
-  if (!email) return { ...catchAllCandidate, permutations_tried: permutationsTried, cost_usd: totalCost, duration_ms: Date.now() - start };
-
-  const debounce = new DebounceProvider();
-  if (!debounce.is_configured()) {
-    return { ...catchAllCandidate, permutations_tried: permutationsTried, cost_usd: totalCost, duration_ms: Date.now() - start };
-  }
-
-  const debounceResult = await debounce.verify(email);
-  totalCost += debounceResult.cost_usd;
-
-  // If Debounce says "safe to send" (valid), upgrade confidence
-  if (debounceResult.status === EmailStatus.valid) {
-    const pattern = identifyPattern(email, first, last);
-    await cacheVerification(email, "valid", 0.9, VerificationMethod.debounce);
-    return makeResult({
-      email,
-      status: EmailStatus.valid,
-      confidence: 0.9, // Debounce confirmed valid on a catch-all domain
-      method: VerificationMethod.debounce,
-      pattern,
-      domain_info: catchAllCandidate.domain_info,
-      permutations_tried: permutationsTried,
-      cost_usd: totalCost,
-      duration_ms: Date.now() - start,
-    });
-  }
-
-  // If Debounce also says catch-all, keep our best guess but note the SERP confidence
-  return {
-    ...catchAllCandidate,
-    permutations_tried: permutationsTried,
-    cost_usd: totalCost,
-    duration_ms: Date.now() - start,
-  };
 }
 
 async function logSearch(
@@ -623,3 +780,7 @@ async function logSearch(
     // Non-critical — don't fail pipeline on log errors
   }
 }
+
+// `normalizeName` is re-exported for the backfill script, which needs the same
+// normalization the pipeline uses to keep mined patterns comparable.
+export { normalizeName };

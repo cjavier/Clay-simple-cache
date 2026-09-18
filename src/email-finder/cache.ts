@@ -56,15 +56,27 @@ export async function getCachedVerificationsBatch(
   return result;
 }
 
+/**
+ * How long a verdict stays trustworthy, by verdict.
+ *
+ * `invalid` is a property of the mailbox and barely changes, so it keeps the
+ * full TTL. `unknown` usually means the probe was refused, not that the address
+ * is bad — a short TTL stops a transient gateway hiccup from being remembered
+ * as fact for a month, while still absorbing the repeat traffic that matters:
+ * 20.1% of all searches are a repeat of the same person and domain.
+ */
+function ttlSecondsFor(status: string): number {
+  if (status === EmailStatus.unknown) return 3 * 24 * 60 * 60; // 3 days
+  return config.verification_cache_ttl;
+}
+
 export async function cacheVerification(
   email: string,
   status: string,
   confidence: number,
   method: string | null
 ): Promise<void> {
-  const expiresAt = new Date(
-    Date.now() + config.verification_cache_ttl * 1000
-  );
+  const expiresAt = new Date(Date.now() + ttlSecondsFor(status) * 1000);
 
   await prisma.verificationCache.upsert({
     where: { email },
@@ -84,4 +96,36 @@ export async function cacheVerification(
       expires_at: expiresAt,
     },
   });
+}
+
+/**
+ * Remember the verdicts a search ruled out, not just the one it kept.
+ *
+ * pipeline.ts only ever cached the address it returned, so `verification_cache`
+ * held 13,194 rows after 2.9 million paid calls — every `invalid` we bought was
+ * thrown away the moment it was read. The next search for the same person
+ * (20.1% of all traffic) paid for the identical rejections again.
+ *
+ * Writes are fire-and-forget: a cache miss costs a call, a failed cache write
+ * must not cost an answer.
+ */
+export async function cacheNegativeVerifications(
+  results: { email: string; status: EmailStatus; confidence: number; method: string | null }[]
+): Promise<void> {
+  const worthKeeping = results.filter(
+    (r) =>
+      r.email &&
+      (r.status === EmailStatus.invalid ||
+        r.status === EmailStatus.unknown ||
+        r.status === EmailStatus.no_mx ||
+        r.status === EmailStatus.disposable ||
+        r.status === EmailStatus.role_account)
+  );
+  if (worthKeeping.length === 0) return;
+
+  await Promise.all(
+    worthKeeping.map((r) =>
+      cacheVerification(r.email, r.status, r.confidence, r.method).catch(() => undefined)
+    )
+  );
 }

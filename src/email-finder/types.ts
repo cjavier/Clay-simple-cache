@@ -17,6 +17,12 @@ export enum VerificationMethod {
   bouncer = "bouncer",
   neverbounce = "neverbounce",
   serp_pattern = "serp_pattern",
+  /** Answered from an address already in `profiles`. No API call, no cost. */
+  known_email = "known_email",
+  /** Built from the domain's learned mailbox convention rather than probed. */
+  domain_pattern = "domain_pattern",
+  /** Refused up front: this domain has never produced a result. */
+  domain_muted = "domain_muted",
 }
 
 export enum ProviderType {
@@ -55,6 +61,14 @@ export interface VerificationResult {
   permutations_tried: number;
   cost_usd: number;
   duration_ms: number;
+  /**
+   * Where the surnames we spelled came from. "linkedin" means we recovered the
+   * paternal surname from the slug instead of trusting the `last_name` field,
+   * which carries the maternal surname 74.9% of the time.
+   */
+  identity_source?: "linkedin" | "full_name" | "given";
+  /** The surnames actually tried, in the order they were tried. */
+  surnames_tried?: string[];
 }
 
 export interface FindRequest {
@@ -62,8 +76,17 @@ export interface FindRequest {
   last_name?: string;
   domain: string;
   full_name?: string;
+  /**
+   * The person's LinkedIn profile, as a URL or a bare slug. Optional, and by
+   * far the most valuable thing a caller can send: the slug carries the full
+   * name, which is where the paternal surname lives.
+   */
+  linkedin_url?: string;
+  linkedin_slug?: string;
   max_tier?: number;
   force_premium?: boolean;
+  /** Override the wall-clock budget for this one search. */
+  time_budget_ms?: number;
 }
 
 export interface EmailVerificationProvider {
