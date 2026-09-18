@@ -267,6 +267,11 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
   // $8.05 against the host "www.gob.pe", which has no mailboxes at all.
   const domain = normalizeDomain(request.domain || "");
   if (!domain) {
+    await logSearch({
+      first_name: null, last_name: null, domain: request.domain || null,
+      result_status: "invalid", method_used: VerificationMethod.local_syntax,
+      duration_ms: Date.now() - start,
+    });
     return makeResult({
       status: EmailStatus.invalid,
       confidence: 1,
@@ -287,6 +292,11 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
   };
 
   if (!first && identity.surnames.length === 0) {
+    await logSearch({
+      first_name: null, last_name: null, domain,
+      result_status: "invalid", method_used: VerificationMethod.local_syntax,
+      duration_ms: Date.now() - start, identity_source: identity.source,
+    });
     return makeResult({
       status: EmailStatus.invalid,
       confidence: 1,
@@ -315,7 +325,16 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
   // ── 4. Domain analysis and early exits ──
   const domainInfo = await analyzeDomain(domain);
 
+  // The early exits are logged too. They cost nothing in API calls, but a
+  // search that never reaches the cascade is still a search Clay asked for,
+  // and leaving it out of `search_log` silently understates the traffic and
+  // overstates the average cost per search.
   if (!domainInfo.has_mx) {
+    await logSearch({
+      first_name: first, last_name: last, domain,
+      result_status: "no_mx", method_used: VerificationMethod.local_dns,
+      duration_ms: Date.now() - start, identity_source: identity.source,
+    });
     return makeResult({
       status: EmailStatus.no_mx,
       domain_info: domainInfo,
@@ -324,6 +343,11 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
     });
   }
   if (domainInfo.is_disposable) {
+    await logSearch({
+      first_name: first, last_name: last, domain,
+      result_status: "disposable", method_used: VerificationMethod.local_dns,
+      duration_ms: Date.now() - start, identity_source: identity.source,
+    });
     return makeResult({
       status: EmailStatus.disposable,
       domain_info: domainInfo,
@@ -390,6 +414,12 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
     if (cached?.status === EmailStatus.valid) {
       const pattern = identifyPatternForSurnames(email, first, identity.surnames);
       await recordDomainOutcome(domain, true);
+      await logSearch({
+        first_name: first, last_name: last, domain,
+        result_email: email, result_status: "valid",
+        method_used: cached.method, duration_ms: Date.now() - start,
+        identity_source: identity.source, candidates_built: candidatesBuilt,
+      });
       return makeResult({
         email,
         status: EmailStatus.valid,
