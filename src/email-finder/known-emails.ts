@@ -93,3 +93,23 @@ export function matchPerson(
 
   return null;
 }
+
+/**
+ * Is this exact address one we already hold?
+ *
+ * `/find` reads `profiles` before spending; `/verify` did not, so re-checking
+ * an address this service itself delivered last week cost a paid call. An
+ * address sitting in `profiles` reached us because a provider found it and
+ * Clay stored it — that is a stronger signal than a fresh SMTP probe, and it
+ * is free.
+ */
+export async function isKnownAddress(email: string): Promise<boolean> {
+  try {
+    const rows = await prisma.$queryRaw<{ one: number }[]>`
+      SELECT 1 AS one FROM profiles WHERE lower(email) = ${email.toLowerCase()} LIMIT 1
+    `;
+    return rows.length > 0;
+  } catch {
+    return false;
+  }
+}

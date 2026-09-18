@@ -1,4 +1,8 @@
-import { scoreRecentAnswers, QualityReport } from "../services/finder-quality.service";
+import {
+  scoreRecentAnswers,
+  persistQualityReport,
+  QualityReport,
+} from "../services/finder-quality.service";
 import { postSlackMessage, isSlackConfigured } from "../services/slack.service";
 
 /**
@@ -89,6 +93,10 @@ export async function runQualityCheck(opts: {
   const report = await scoreRecentAnswers(opts.windowDays ?? 7);
   const problems = findProblems(report);
 
+  // Record before deciding whether to alert: an all-green day is exactly the
+  // day whose numbers you want on file when something later goes wrong.
+  if (!opts.dryRun) await persistQualityReport(report);
+
   log(`Calidad del finder — ${report.sampled} respuestas de los últimos ${report.window_days} días`);
   for (const [status, b] of Object.entries(report.by_status)) {
     const agree = b.agreement_rate === null ? "—" : `${(b.agreement_rate * 100).toFixed(1)}%`;
@@ -101,6 +109,11 @@ export async function runQualityCheck(opts: {
   if (report.latency.p50_ms !== null) {
     log(`  latencia p50 ${Math.round(report.latency.p50_ms / 1000)}s · p90 ${Math.round((report.latency.p90_ms || 0) / 1000)}s`);
   }
+  log(
+    `  volumen ${report.volume.searches} búsquedas · ${report.volume.api_calls} llamadas · ` +
+      `$${report.volume.cost_usd.toFixed(2)} ` +
+      `($${(report.volume.searches ? report.volume.cost_usd / report.volume.searches : 0).toFixed(5)}/búsqueda)`
+  );
 
   if (problems.length === 0) {
     log("Sin problemas — silencio.");

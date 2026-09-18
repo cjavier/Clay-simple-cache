@@ -225,6 +225,53 @@ export const emailFinderController = {
     }
   },
 
+  /**
+   * The recorded history behind `stats.quality`.
+   *
+   * `/stats` computes a rolling window live, which cannot answer "was this
+   * better than last month" — once the window slides, the old number is gone.
+   * The daily job writes a dated row; this reads them back, the same way
+   * `/credits/history` does for provider balances.
+   */
+  async statsHistory(req: Request, res: Response) {
+    try {
+      const days = Math.min(Number(req.query.days) || 90, 365);
+      const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+      since.setUTCHours(0, 0, 0, 0);
+
+      const rows = await prisma.finderMetric.findMany({
+        where: { measured_on: { gte: since } },
+        orderBy: [{ measured_on: "desc" }, { status: "asc" }],
+      });
+
+      res.json({
+        days,
+        count: rows.length,
+        metrics: rows.map((r) => ({
+          measured_on: r.measured_on.toISOString().slice(0, 10),
+          window_days: r.window_days,
+          status: r.status,
+          answered: r.answered,
+          comparable: r.comparable,
+          agreed: r.agreed,
+          agreement_rate: r.agreement_rate,
+          delivered: r.delivered,
+          delivery_rate: r.delivery_rate,
+          searches: r.searches,
+          api_calls: r.api_calls,
+          cost_usd: r.cost_usd,
+          cost_per_search: r.searches > 0 ? r.cost_usd / r.searches : null,
+          calls_per_search: r.searches > 0 ? r.api_calls / r.searches : null,
+          p50_ms: r.p50_ms,
+          p90_ms: r.p90_ms,
+        })),
+      });
+    } catch (error: any) {
+      console.error("Email Finder Stats History Error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  },
+
   async stats(req: Request, res: Response) {
     try {
       const windowDays = Math.min(Number(req.query.window_days) || 7, 90);

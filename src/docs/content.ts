@@ -79,7 +79,8 @@ curl -H "Authorization: Bearer your_secret_key" {{BASE_URL}}/profiles?email=test
 | \`POST\` | \`/find/batch\` | Queue a list of searches; returns a job id immediately. | [Email Finder](#find-batch-post) |
 | \`GET\` | \`/find/batch/:id\` | Batch job status and results. | [Email Finder](#find-batch-get) |
 | \`POST\` | \`/verify\` | Verify an existing email address. | [Email Finder](#verify-post) |
-| \`GET\` | \`/stats\` | Aggregate email finder metrics. | [Email Finder](#stats-get) |
+| \`GET\` | \`/stats\` | Finder metrics, including per-verdict accuracy. | [Email Finder](#stats-get) |
+| \`GET\` | \`/stats/history\` | Recorded daily accuracy/cost/latency snapshots. | [Email Finder](#stats-get) |
 | \`GET\` | \`/credits\` | Live balance + green/yellow/red status per paid provider. | [Credits](#credits-get) |
 | \`GET\` | \`/credits/history\` | Recorded balance history from the daily check. | [Credits](#credits-get) |
 | \`POST\` | \`/detect-tech\` | Detect web technologies used by a URL. | [Tech Detector](#detect-tech-post) |
@@ -313,6 +314,8 @@ The search spends in this order, stopping at the first answer: addresses already
 
 \`method: "known_email"\` and \`method: "domain_muted"\` both cost \`0\` — the first was answered from the cache, the second refused because the domain has never produced a result.
 
+\`timed_out: true\` means the search hit its 20-second budget before exhausting its candidates. It is **not** a verdict: it says we stopped looking, not that the address doesn't exist. Retry later rather than marking the contact dead. (It is a separate field instead of a \`status\` value because \`unknown\` already means two different things, and that ambiguity is precisely what let a 103-day provider outage read as "these people have no email".)
+
 <a id="find-batch-post"></a>
 ### \`POST /find/batch\` — Find Emails (async)
 
@@ -349,6 +352,8 @@ If \`dnc_client\` was sent and matched, the response is **only** \`{ "do_not_con
 | \`max_tier\` | number | No | \`2\` | Max verification tier (\`1\` or \`2\`). |
 | \`dnc_client\` | string | No | — | Checked against \`email\` before verifying; see [semantics](#dnc-client-semantics). |
 
+Checks two caches before spending: the 30-day verification cache, then the addresses already in \`profiles\`. An address we already hold came from a provider that found it and a caller that kept it — better evidence than a fresh probe, and free. Those come back as \`method: "known_email"\`, \`cost_usd: 0\`.
+
 **Response — \`200\`**:
 \`\`\`json
 {
@@ -366,23 +371,61 @@ Blocked case: only \`{ "do_not_contact": true, "matched_by": "..." }\`. Otherwis
 **Errors**: \`400\` missing \`email\`; \`404\` \`dnc_client\` not found.
 
 <a id="stats-get"></a>
-### \`GET /stats\` — Aggregate Metrics
+### \`GET /stats\` — Finder Metrics
 
-No params. Returns totals across all searches ever run.
+**Query**: \`window_days\` (default \`7\`, max \`90\`) — the window \`quality\` is measured over.
 
 \`\`\`json
 {
   "total_searches": 100,
   "total_valid_found": 15,
   "success_rate": 0.15,
-  "methods_breakdown": { "emaillistverify": 12, "debounce": 3 },
+  "methods_breakdown": { "emaillistverify": 12, "debounce": 3, "known_email": 40, "domain_pattern": 22 },
   "total_cost_usd": 0.099,
   "avg_cost_per_email": 0.00099,
   "domains_in_cache": 93,
   "patterns_learned": 8,
-  "catch_all_domains": 17
+  "catch_all_domains": 17,
+  "muted_domains": 23,
+  "debounce_queue": { "active": 0, "waiting": 0, "max_queue": 40 },
+  "quality": {
+    "window_days": 7,
+    "sampled": 2000,
+    "by_status": {
+      "valid":     { "answered": 598, "comparable": 516, "agreed": 495, "agreement_rate": 0.959, "delivered": 545, "delivery_rate": 0.911 },
+      "catch_all": { "answered": 1402, "comparable": 898, "agreed": 290, "agreement_rate": 0.323, "delivered": 331, "delivery_rate": 0.236 }
+    },
+    "latency": { "p50_ms": 1705378, "p90_ms": 17684000, "over_2min_pct": 0.732 },
+    "volume": { "searches": 4200, "api_calls": 7100, "cost_usd": 6.35 }
+  }
 }
 \`\`\`
+
+**Read \`quality\`, not \`success_rate\`.** \`success_rate\` is \`valid / total_searches\` — a volume measure that says nothing about whether the address was right, and it kept two very different verdicts under one number: \`valid\` agrees with the address another provider independently found **95.9%** of the time, \`catch_all\` **32.3%**. It is retained only so existing callers don't break.
+
+- \`agreement_rate\` — of the answers where \`profiles\` independently holds an address for the same person, how many match ours. This is accuracy.
+- \`delivery_rate\` — whether the address we returned exists in \`profiles\` at all, i.e. whether the caller was still listening when it arrived. Answers under 30s landed 99.3% of the time; answers over an hour, 29.4%.
+- \`comparable\` — how many answers had an independent address to compare against. A rate computed from a handful of them means nothing; the alerting ignores anything under 40.
+
+<a id="stats-history-get"></a>
+### \`GET /stats/history\` — Recorded Quality Snapshots
+
+**Query**: \`days\` (default \`90\`, max \`365\`).
+
+\`/stats\` computes a rolling window live, so once the window slides the number is gone and "was this better than last month?" becomes unanswerable. The daily job writes a dated row per verdict; this reads them back, with \`cost_per_search\` and \`calls_per_search\` derived. Same idea as \`/credits/history\`.
+
+\`\`\`json
+{
+  "days": 90,
+  "count": 3,
+  "metrics": [
+    { "measured_on": "2026-09-18", "status": "valid", "agreement_rate": 0.959, "delivery_rate": 0.911, "answered": 598 },
+    { "measured_on": "2026-09-18", "status": "catch_all", "agreement_rate": 0.823, "delivery_rate": 0.978, "answered": 1402 },
+    { "measured_on": "2026-09-18", "status": "_overall", "searches": 4200, "api_calls": 7100, "cost_usd": 6.35, "cost_per_search": 0.0015, "calls_per_search": 1.69, "p50_ms": 1800, "p90_ms": 9000 }
+  ]
+}
+\`\`\`
+The \`_overall\` row carries cost and latency; the per-verdict rows carry accuracy.
 
 ---
 

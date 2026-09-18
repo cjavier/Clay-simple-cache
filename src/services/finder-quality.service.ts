@@ -37,6 +37,7 @@ export interface QualityReport {
     }
   >;
   latency: { p50_ms: number | null; p90_ms: number | null; over_2min_pct: number | null };
+  volume: { searches: number; api_calls: number; cost_usd: number };
 }
 
 interface AnswerRow {
@@ -103,9 +104,98 @@ export async function scoreRecentAnswers(
       bucket.answered > 0 ? bucket.delivered / bucket.answered : 0;
   }
 
-  const latency = await latencyStats(since);
+  const [latency, volume] = await Promise.all([latencyStats(since), volumeStats(since)]);
 
-  return { window_days: windowDays, sampled: answers.length, by_status, latency };
+  return { window_days: windowDays, sampled: answers.length, by_status, latency, volume };
+}
+
+/**
+ * Write today's numbers down.
+ *
+ * `scoreRecentAnswers` reads a rolling window, so once the window slides the
+ * number is gone. Answering "did the change work?" in a month needs the figure
+ * recorded on the day it was true — the same reason `provider_credits` keeps
+ * history instead of a single current-state row. Keyed on
+ * (measured_on, window_days, status) so re-running a day overwrites rather than
+ * duplicating.
+ */
+export async function persistQualityReport(report: QualityReport): Promise<void> {
+  const measuredOn = new Date();
+  measuredOn.setUTCHours(0, 0, 0, 0);
+
+  const rows = [
+    ...Object.entries(report.by_status).map(([status, b]) => ({
+      status,
+      answered: b.answered,
+      comparable: b.comparable,
+      agreed: b.agreed,
+      agreement_rate: b.agreement_rate,
+      delivered: b.delivered,
+      delivery_rate: b.delivery_rate,
+      searches: 0,
+      api_calls: 0,
+      cost_usd: 0,
+      p50_ms: null as number | null,
+      p90_ms: null as number | null,
+      raw: {} as object,
+    })),
+    // One `_overall` row carries the figures that aren't per-verdict, so a
+    // single query can chart cost-per-search and latency over time.
+    {
+      status: "_overall",
+      answered: report.sampled,
+      comparable: 0,
+      agreed: 0,
+      agreement_rate: null,
+      delivered: 0,
+      delivery_rate: null,
+      searches: report.volume.searches,
+      api_calls: report.volume.api_calls,
+      cost_usd: report.volume.cost_usd,
+      p50_ms: report.latency.p50_ms,
+      p90_ms: report.latency.p90_ms,
+      raw: { over_2min_pct: report.latency.over_2min_pct } as object,
+    },
+  ];
+
+  for (const row of rows) {
+    try {
+      await prisma.finderMetric.upsert({
+        where: {
+          measured_on_window_days_status: {
+            measured_on: measuredOn,
+            window_days: report.window_days,
+            status: row.status,
+          },
+        },
+        update: { ...row, created_at: new Date() },
+        create: {
+          measured_on: measuredOn,
+          window_days: report.window_days,
+          ...row,
+        },
+      });
+    } catch (e) {
+      console.error(`persistQualityReport(${row.status}) failed:`, e);
+    }
+  }
+}
+
+async function volumeStats(since: Date) {
+  try {
+    const [row] = await prisma.$queryRaw<
+      { searches: number; api_calls: number; cost_usd: number }[]
+    >`
+      SELECT count(*)::int AS searches,
+             COALESCE(sum(api_calls_made), 0)::int AS api_calls,
+             COALESCE(sum(cost_usd), 0)::float8 AS cost_usd
+      FROM search_log
+      WHERE created_at >= ${since}
+    `;
+    return row || { searches: 0, api_calls: 0, cost_usd: 0 };
+  } catch {
+    return { searches: 0, api_calls: 0, cost_usd: 0 };
+  }
 }
 
 interface KnownRow {

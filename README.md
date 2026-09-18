@@ -26,10 +26,14 @@ Full endpoint reference (request/response shapes, error codes, curl examples, an
   - Multi-tier API verification cascade (EmailListVerify, DeBounce), MX lookup, provider detection, disposable/free checks.
   - LATAM naming: compound surnames are split paternal-first, particles are glued rather than treated as surnames (`de la Torre` → `delatorre`, never `la`), and the compound-initial spelling (`José Carlos Morente` → `jcmorente@`) is generated.
   - Pattern prevalence is measured from the verified emails in `profiles`, not estimated.
+- **Measurement & history** (so the effect of a change stays visible after the fact):
+  - `search_log` records `identity_source` (was the surname recovered from LinkedIn, a full name, or taken as sent), `timed_out`, and `candidates_built` alongside `permutations_tried` — the gap between those two is what the budget is actually saving.
+  - `finder_metrics` keeps a dated daily snapshot of accuracy, delivery, cost and latency, written by the daily job. `GET /stats` reads a rolling window live; once that window slides the number is gone, so it is written down on the day it was true — the same reason `provider_credits` keeps history instead of current state. `GET /stats/history` reads it back.
+  - Historical knowledge was backfilled rather than relearned at cost: `scripts/backfill_domain_patterns.ts` (56,340 domains), `scripts/backfill_catch_all_domains.ts` (2,829 catch-all domains recovered from `search_log`, since the flag could never be written before), `scripts/seed_domain_health.ts` (18,390 domains, 23 muted).
 - **Finder Quality Monitor**:
   - `GET /stats` used to report `valid / total_searches`, which says nothing about whether the address was right — and hid the gap that mattered: `valid` matches the address another provider found **95.2%** of the time, `catch_all` **33.3%**. Both were one number.
   - `stats.quality` now reports agreement and delivery per verdict, plus latency percentiles. "Delivery" is whether the address we returned exists in `profiles` — a direct read on whether callers are still listening.
-  - The daily job that watches provider balances also alerts when `catch_all` precision drops under 60%, `valid` under 85%, or the median answer passes 30s. Those are the two indicators that would have caught both failures months earlier.
+  - The daily job that watches provider balances also alerts when `catch_all` precision drops under 60%, `valid` under 85%, or the median answer passes 30s. Those are the two indicators that would have caught both failures months earlier. It records the day's numbers first and alerts second — an all-green day is exactly the one you want on file when something later goes wrong.
 - **Tech Detector**:
   - Given a URL, fetches its HTML and detects web technologies (CMS, ecommerce, analytics, tag managers, marketing tools, advertising pixels, payment integrations, CDN, SEO plugins, and privacy tools).
 - **LinkedIn Finder**:

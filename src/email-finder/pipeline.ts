@@ -29,6 +29,7 @@ import { saveDomainPattern, getDomainPatterns } from "./pattern-learner";
 import {
   getKnownEmailsForDomain,
   matchPerson,
+  isKnownAddress,
   KnownEmail,
 } from "./known-emails";
 import { getCachedSerp, cacheSerp } from "./serp-cache";
@@ -298,7 +299,11 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
   // ── 3. Circuit breaker ──
   const health = await checkDomainHealth(domain);
   if (health.muted) {
-    await logSearch(first, last, domain, null, "unknown", VerificationMethod.domain_muted, 0, 0, 0, Date.now() - start);
+    await logSearch({
+      first_name: first, last_name: last, domain,
+      result_status: "unknown", method_used: VerificationMethod.domain_muted,
+      duration_ms: Date.now() - start, identity_source: identity.source,
+    });
     return makeResult({
       status: EmailStatus.unknown,
       method: VerificationMethod.domain_muted,
@@ -336,7 +341,12 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
   if (alreadyKnown) {
     const pattern = identifyPatternForSurnames(alreadyKnown.email, first, identity.surnames);
     await recordDomainOutcome(domain, true);
-    await logSearch(first, last, domain, alreadyKnown.email, "valid", VerificationMethod.known_email, 0, 0, 0, Date.now() - start);
+    await logSearch({
+      first_name: first, last_name: last, domain,
+      result_email: alreadyKnown.email, result_status: "valid",
+      method_used: VerificationMethod.known_email,
+      duration_ms: Date.now() - start, identity_source: identity.source,
+    });
     return makeResult({
       email: alreadyKnown.email,
       status: EmailStatus.valid,
@@ -356,6 +366,11 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
     domain,
     identity.second_given
   );
+
+  // Everything the permutator could offer, before any budget truncates it.
+  // Logged alongside `permutations_tried` so the saving the budget produces is
+  // a measured number rather than an assumption.
+  const candidatesBuilt = candidates.length;
 
   const dbPatterns = await getDomainPatterns(domain);
   const inferredPatterns = inferPatternsFromKnownEmails(knownEmails);
@@ -408,7 +423,13 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
     const pattern = identifyPatternForSurnames(best, first, identity.surnames);
     const confidence = confidenceForPattern(patterns[0]);
     await recordDomainOutcome(domain, true);
-    await logSearch(first, last, domain, best, "catch_all", VerificationMethod.domain_pattern, 0, 0, 0, Date.now() - start);
+    await logSearch({
+      first_name: first, last_name: last, domain,
+      result_email: best, result_status: "catch_all",
+      method_used: VerificationMethod.domain_pattern,
+      duration_ms: Date.now() - start, identity_source: identity.source,
+      candidates_built: candidatesBuilt,
+    });
     return makeResult({
       email: best,
       status: EmailStatus.catch_all,
@@ -433,7 +454,7 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
     if (verdict.status === EmailStatus.valid) {
       return await concludeValid(
         single, verdict, first, last, identity, domain, domainInfo, null,
-        permutationsTried, apiCalls, totalCost, start, identityInfo
+        permutationsTried, apiCalls, totalCost, start, identityInfo, candidatesBuilt
       );
     }
     if (verdict.status === EmailStatus.catch_all) {
@@ -441,7 +462,14 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
       const pattern = identifyPatternForSurnames(single, first, identity.surnames);
       await recordDomainOutcome(domain, true);
       await cacheVerification(single, "catch_all", confidenceForPattern(strongPattern), VerificationMethod.domain_pattern);
-      await logSearch(first, last, domain, single, "catch_all", VerificationMethod.domain_pattern, permutationsTried, apiCalls, totalCost, Date.now() - start);
+      await logSearch({
+        first_name: first, last_name: last, domain,
+        result_email: single, result_status: "catch_all",
+        method_used: VerificationMethod.domain_pattern,
+        permutations_tried: permutationsTried, api_calls_made: apiCalls,
+        cost_usd: totalCost, duration_ms: Date.now() - start,
+        identity_source: identity.source, candidates_built: candidatesBuilt,
+      });
       return makeResult({
         email: single,
         status: EmailStatus.catch_all,
@@ -552,7 +580,7 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
         await cacheNegativeVerifications(negatives);
         return await concludeValid(
           email, result, first, last, identity, domain, domainInfo, serpInfo,
-          permutationsTried, apiCalls, totalCost, start, identityInfo
+          permutationsTried, apiCalls, totalCost, start, identityInfo, candidatesBuilt
         );
       }
 
@@ -591,7 +619,15 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
 
     await cacheVerification(best, "catch_all", confidence, VerificationMethod.domain_pattern);
     await recordDomainOutcome(domain, true);
-    await logSearch(first, last, domain, best, "catch_all", VerificationMethod.domain_pattern, permutationsTried, apiCalls, totalCost, Date.now() - start);
+    await logSearch({
+      first_name: first, last_name: last, domain,
+      result_email: best, result_status: "catch_all",
+      method_used: VerificationMethod.domain_pattern,
+      permutations_tried: permutationsTried, api_calls_made: apiCalls,
+      cost_usd: totalCost, duration_ms: Date.now() - start,
+      identity_source: identity.source, timed_out: timedOut,
+      candidates_built: candidatesBuilt,
+    });
     return makeResult({
       email: best,
       status: EmailStatus.catch_all,
@@ -615,11 +651,26 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
   if (!timedOut) await recordDomainOutcome(domain, false);
 
   if (riskyCandidate) {
-    await logSearch(first, last, domain, riskyCandidate.email, "risky", riskyCandidate.method, permutationsTried, apiCalls, totalCost, Date.now() - start);
+    await logSearch({
+      first_name: first, last_name: last, domain,
+      result_email: riskyCandidate.email, result_status: "risky",
+      method_used: riskyCandidate.method,
+      permutations_tried: permutationsTried, api_calls_made: apiCalls,
+      cost_usd: totalCost, duration_ms: Date.now() - start,
+      identity_source: identity.source, timed_out: timedOut,
+      candidates_built: candidatesBuilt,
+    });
     return { ...riskyCandidate, serp_info: serpInfo, duration_ms: Date.now() - start, cost_usd: totalCost, ...identityInfo, timed_out: timedOut };
   }
 
-  await logSearch(first, last, domain, null, "unknown", timedOut ? "timed_out" : null, permutationsTried, apiCalls, totalCost, Date.now() - start);
+  await logSearch({
+    first_name: first, last_name: last, domain,
+    result_status: "unknown", method_used: timedOut ? "timed_out" : null,
+    permutations_tried: permutationsTried, api_calls_made: apiCalls,
+    cost_usd: totalCost, duration_ms: Date.now() - start,
+    identity_source: identity.source, timed_out: timedOut,
+    candidates_built: candidatesBuilt,
+  });
   return makeResult({
     status: EmailStatus.unknown,
     domain_info: domainInfo,
@@ -661,13 +712,20 @@ async function concludeValid(
   apiCalls: number,
   totalCost: number,
   start: number,
-  identityInfo: Record<string, unknown>
+  identityInfo: Record<string, unknown>,
+  candidatesBuilt: number
 ): Promise<VerificationResult> {
   const pattern = identifyPatternForSurnames(email, first, identity.surnames);
   if (pattern) await saveDomainPattern(domain, pattern);
   await cacheVerification(email, "valid", result.confidence, result.method);
   await recordDomainOutcome(domain, true);
-  await logSearch(first, last, domain, email, "valid", result.method, permutationsTried, apiCalls, totalCost, Date.now() - start);
+  await logSearch({
+    first_name: first, last_name: last, domain,
+    result_email: email, result_status: "valid", method_used: result.method,
+    permutations_tried: permutationsTried, api_calls_made: apiCalls,
+    cost_usd: totalCost, duration_ms: Date.now() - start,
+    identity_source: identity.source, candidates_built: candidatesBuilt,
+  });
 
   return makeResult({
     email,
@@ -715,6 +773,20 @@ export async function verifySingleEmail(
     });
   }
 
+  // 2b. Already in `profiles`? Then a provider found it and Clay kept it —
+  // better evidence than a fresh probe, and free. Written into the verification
+  // cache on the way out so the next call doesn't even pay the query.
+  if (await isKnownAddress(email)) {
+    await cacheVerification(email, "valid", 0.95, VerificationMethod.known_email);
+    return makeResult({
+      email,
+      status: EmailStatus.valid,
+      confidence: 0.95,
+      method: VerificationMethod.known_email,
+      duration_ms: Date.now() - start,
+    });
+  }
+
   // 3. Domain analysis
   const domainInfo = await analyzeDomain(domain);
   if (!domainInfo.has_mx) {
@@ -758,31 +830,47 @@ export async function verifySingleEmail(
   });
 }
 
-async function logSearch(
-  firstName: string | null,
-  lastName: string | null,
-  domain: string | null,
-  resultEmail: string | null,
-  resultStatus: string | null,
-  methodUsed: string | VerificationMethod | null,
-  permutationsTried: number,
-  apiCallsMade: number,
-  costUsd: number,
-  durationMs: number
-): Promise<void> {
+/**
+ * One row per search.
+ *
+ * Positional arguments were a liability here: ten of them, three of which were
+ * numbers in a row, and every new dimension made a silent mis-ordering more
+ * likely. An object also means a caller that forgets `identity_source` records
+ * a null instead of shifting every field after it.
+ */
+interface SearchLogEntry {
+  first_name: string | null;
+  last_name: string | null;
+  domain: string | null;
+  result_email?: string | null;
+  result_status: string | null;
+  method_used?: string | VerificationMethod | null;
+  permutations_tried?: number;
+  api_calls_made?: number;
+  cost_usd?: number;
+  duration_ms: number;
+  identity_source?: string | null;
+  timed_out?: boolean;
+  candidates_built?: number;
+}
+
+async function logSearch(entry: SearchLogEntry): Promise<void> {
   try {
     await prisma.searchLog.create({
       data: {
-        first_name: firstName,
-        last_name: lastName,
-        domain,
-        result_email: resultEmail,
-        result_status: resultStatus,
-        method_used: methodUsed,
-        permutations_tried: permutationsTried,
-        api_calls_made: apiCallsMade,
-        cost_usd: costUsd,
-        duration_ms: durationMs,
+        first_name: entry.first_name,
+        last_name: entry.last_name,
+        domain: entry.domain,
+        result_email: entry.result_email ?? null,
+        result_status: entry.result_status,
+        method_used: (entry.method_used as string) ?? null,
+        permutations_tried: entry.permutations_tried ?? 0,
+        api_calls_made: entry.api_calls_made ?? 0,
+        cost_usd: entry.cost_usd ?? 0,
+        duration_ms: entry.duration_ms,
+        identity_source: entry.identity_source ?? null,
+        timed_out: entry.timed_out ?? false,
+        candidates_built: entry.candidates_built ?? 0,
       },
     });
   } catch {

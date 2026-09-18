@@ -33,6 +33,7 @@ router.post('/find/batch', authMiddleware, emailFinderController.createBatch);
 router.get('/find/batch/:id', authMiddleware, emailFinderController.getBatch);
 router.post('/verify', authMiddleware, emailFinderController.verify);
 router.get('/stats', authMiddleware, emailFinderController.stats);
+router.get('/stats/history', authMiddleware, emailFinderController.statsHistory);
 
 // Provider credit monitor (green / yellow / red per paid API)
 router.get('/credits', authMiddleware, creditsController.live);

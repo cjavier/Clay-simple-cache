@@ -120,10 +120,58 @@ model SearchLog {
   api_calls_made     Int      @default(0)
   cost_usd           Float    @default(0.0)
   duration_ms        Int      @default(0)
+  // Which name we actually spelled the candidates from: 'linkedin' (the
+  // paternal surname recovered from the slug), 'full_name', or 'given' (the
+  // last_name as sent). Without this column the before/after of the single
+  // biggest change is unmeasurable after the fact — the log would show the
+  // hit rate moving with no way to attribute it.
+  identity_source    String?
+  // The search hit its wall-clock budget. A row with this set did not
+  // establish that the address doesn't exist, only that we stopped looking,
+  // and any accuracy measurement has to exclude it rather than score it as a
+  // miss.
+  timed_out          Boolean  @default(false)
+  // How many candidates the permutator produced before the budget truncated
+  // the list. `permutations_tried` is what we paid for; this is what we could
+  // have paid for, and the gap is what the budget is actually saving.
+  candidates_built   Int      @default(0)
   created_at         DateTime @default(now()) @db.Timestamptz(6)
 
   @@index([domain])
+  @@index([created_at])
   @@map("search_log")
+}
+
+// Daily snapshot of how well the finder is answering.
+//
+// `provider_credits` keeps history rather than current state so burn rate is
+// visible; this is the same idea for quality. `GET /stats` computes the numbers
+// live from `search_log` + `profiles`, but that is a point-in-time read over a
+// rolling window: once the window slides, today's agreement rate is gone. To
+// answer "did the change work?" in a month, the number has to be written down
+// on the day it was true.
+model FinderMetric {
+  id             String   @id @default(uuid()) @db.Uuid
+  measured_on    DateTime @db.Date
+  window_days    Int      @default(7)
+  status         String // 'valid' | 'catch_all' | '_overall'
+  answered       Int      @default(0)
+  comparable     Int      @default(0)
+  agreed         Int      @default(0)
+  agreement_rate Float?
+  delivered      Int      @default(0)
+  delivery_rate  Float?
+  searches       Int      @default(0)
+  api_calls      Int      @default(0)
+  cost_usd       Float    @default(0.0)
+  p50_ms         Int?
+  p90_ms         Int?
+  raw            Json     @default("{}")
+  created_at     DateTime @default(now()) @db.Timestamptz(6)
+
+  @@unique([measured_on, window_days, status])
+  @@index([measured_on])
+  @@map("finder_metrics")
 }
 
 // ─── Provider Credit Monitor ────────────────────────────────
