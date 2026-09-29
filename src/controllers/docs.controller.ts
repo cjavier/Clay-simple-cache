@@ -21,7 +21,7 @@ function buildLlmsTxt(baseUrl: string): string {
 
   return `# Clay Cache API
 
-> Identity cache, email finder, tech stack detection, LinkedIn resolution, per-client Do Not Contact (DNC) lists, and DeepSeek-backed AI endpoints (copy generation + a web-research agent), for a GTM outbound agency.
+> Identity cache, email finder, tech stack detection, LinkedIn resolution, per-client Do Not Contact (DNC) lists, and LLM-backed AI endpoints (copy generation + a web-research agent; OpenAI gpt-6-luna by default), for a GTM outbound agency.
 
 ## Docs
 

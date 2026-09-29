@@ -54,10 +54,10 @@ router.post('/dnc', authMiddleware, dncController.upload);
 router.post('/dnc/check', authMiddleware, dncController.check);
 router.get('/dnc', authMiddleware, dncController.list);
 
-// Copy Generation (DeepSeek)
+// Copy Generation (LLM — see llm.service.ts)
 router.post('/copy', authMiddleware, copyController.generate);
 
-// Explore Agent (DeepSeek + function calling)
+// Explore Agent (LLM + function calling)
 router.post('/explore', authMiddleware, exploreController.explore);
 
 // MCP (Model Context Protocol) server — Streamable HTTP, stateless.

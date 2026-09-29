@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { exploreController } from "../../src/controllers/explore.controller";
 
 vi.mock("../../src/email-finder/config", () => ({
@@ -28,6 +28,16 @@ function mockReqRes(body: any) {
   };
   return { req, res };
 }
+
+
+// These tests exercise the DeepSeek wire format; openai-service.test.ts covers
+// the default OpenAI provider.
+beforeEach(() => {
+  vi.stubEnv("LLM_PROVIDER", "deepseek");
+});
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 describe("exploreController.explore", () => {
   const ORIGINAL_KEY = process.env.DEEPSEEK_API_KEY;

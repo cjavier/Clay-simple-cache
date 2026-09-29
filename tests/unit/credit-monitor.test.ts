@@ -47,6 +47,16 @@ function report(checks: CreditCheck[]) {
   };
 }
 
+
+// These tests exercise the DeepSeek wire format; openai-service.test.ts covers
+// the default OpenAI provider.
+beforeEach(() => {
+  vi.stubEnv("LLM_PROVIDER", "deepseek");
+});
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
+
 describe("worstStatus", () => {
   it("is green only when everything is green", () => {
     expect(worstStatus([check("a", "green"), check("b", "green")])).toBe("green");
@@ -267,5 +277,65 @@ describe("alert wording distinguishes why a provider is red", () => {
     expect(__testWord(check("a", "red", { balance: null }))).toBe("SIN ACCESO");
     expect(__testWord(check("a", "yellow", { balance: 5000 }))).toBe("BAJO");
     expect(__testWord(check("a", "green", { balance: 90000 }))).toBe("OK");
+  });
+});
+
+describe("checkAllCredits — OpenAI as the active LLM provider", () => {
+  const realFetch = globalThis.fetch;
+
+  beforeEach(() => {
+    vi.stubEnv("LLM_PROVIDER", "openai");
+    vi.stubEnv("OPENAI_API_KEY", "k");
+    vi.stubEnv("OPENAI_MODEL", "");
+    mockPrisma.$queryRaw.mockResolvedValue([{ searches: 30000n, verifications: 30000n }]);
+    process.env.EMAILLISTVERIFY_API_KEY = "k";
+    process.env.DEBOUNCE_API_KEY = "k";
+    process.env.SERPER_API_KEY = "k";
+  });
+
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    vi.restoreAllMocks();
+  });
+
+  function stubOpenAI(status: number, body: unknown) {
+    globalThis.fetch = vi.fn(async (url: any) => {
+      const u = String(url);
+      const payload = u.includes("openai.com")
+        ? body
+        : u.includes("emaillistverify.com")
+        ? { onDemand: { available: 50000 } }
+        : u.includes("debounce.io")
+        ? { balance: "50000", success: "1" }
+        : { balance: 50000 };
+      const ok = u.includes("openai.com") ? status < 300 : true;
+      return { ok, status: u.includes("openai.com") ? status : 200, text: async () => JSON.stringify(payload) } as any;
+    }) as any;
+  }
+
+  it("checks OpenAI instead of DeepSeek and reports a working key green", async () => {
+    stubOpenAI(200, { status: "completed", usage: { input_tokens: 7, output_tokens: 3 } });
+    const r = await checkAllCredits();
+    expect(r.checks.find((c) => c.provider === "deepseek")).toBeUndefined();
+    const oa = r.checks.find((c) => c.provider === "openai")!;
+    expect(oa.status).toBe("green");
+    expect(oa.balance).toBeNull();
+    const probe = (globalThis.fetch as any).mock.calls.find((c: any[]) => String(c[0]).includes("openai.com"));
+    expect(JSON.parse(probe[1].body).model).toBe("gpt-6-luna");
+  });
+
+  it("reports exhausted quota as red with a zero balance", async () => {
+    stubOpenAI(429, { error: { code: "insufficient_quota", message: "You exceeded your current quota" } });
+    const oa = (await checkAllCredits()).checks.find((c) => c.provider === "openai")!;
+    expect(oa.status).toBe("red");
+    expect(oa.balance).toBe(0);
+    expect(oa.error).toBe("Sin créditos");
+  });
+
+  it("reports a rejected key as red", async () => {
+    stubOpenAI(401, { error: { message: "Incorrect API key" } });
+    const oa = (await checkAllCredits()).checks.find((c) => c.provider === "openai")!;
+    expect(oa.status).toBe("red");
+    expect(oa.error).toBe("API key inválida");
   });
 });

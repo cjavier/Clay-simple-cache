@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
 import { generateCopy } from "../services/copy.service";
-import { DeepSeekApiError, DeepSeekConfigError } from "../services/deepseek.service";
+import { LlmApiError, LlmConfigError } from "../services/llm.service";
 
 export { DEFAULT_SYSTEM_PROMPT } from "../services/copy.service";
 
@@ -38,11 +38,11 @@ export const copyController = {
         duration_ms: Date.now() - start,
       });
     } catch (error: any) {
-      if (error instanceof DeepSeekConfigError) {
+      if (error instanceof LlmConfigError) {
         res.status(503).json({ error: error.message });
         return;
       }
-      if (error instanceof DeepSeekApiError) {
+      if (error instanceof LlmApiError) {
         res.status(502).json({ error: error.message });
         return;
       }

@@ -1,10 +1,8 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
-import {
-  calculateCostUsd,
-  chatCompletion,
-  DeepSeekApiError,
-  DeepSeekConfigError,
-} from "../../src/services/deepseek.service";
+import { calculateCostUsd, deepseekProvider } from "../../src/services/deepseek.service";
+import { LlmApiError, LlmConfigError } from "../../src/services/llm.types";
+
+const chatCompletion = deepseekProvider.chatCompletion;
 
 function mockFetchOnce(body: any, status = 200, ok = status >= 200 && status < 300) {
   return vi.fn().mockResolvedValue({
@@ -32,11 +30,11 @@ describe("deepseek.service chatCompletion", () => {
     }
   });
 
-  it("throws DeepSeekConfigError when DEEPSEEK_API_KEY is missing", async () => {
+  it("throws LlmConfigError when DEEPSEEK_API_KEY is missing", async () => {
     delete process.env.DEEPSEEK_API_KEY;
     await expect(
       chatCompletion({ messages: [{ role: "user", content: "hi" }] })
-    ).rejects.toBeInstanceOf(DeepSeekConfigError);
+    ).rejects.toBeInstanceOf(LlmConfigError);
   });
 
   it("parses choice and usage from a successful response", async () => {
@@ -55,8 +53,8 @@ describe("deepseek.service chatCompletion", () => {
       messages: [{ role: "user", content: "Say hi" }],
     });
 
-    expect(result.choice.message.content).toBe("Hello there");
-    expect(result.choice.finish_reason).toBe("stop");
+    expect(result.message.content).toBe("Hello there");
+    expect(result.finish_reason).toBe("stop");
     expect(result.usage.prompt_tokens).toBe(10);
     expect(result.usage.completion_tokens).toBe(5);
     expect(result.usage.total_tokens).toBe(15);
@@ -72,6 +70,29 @@ describe("deepseek.service chatCompletion", () => {
     expect(options.headers.Authorization).toBe("Bearer test-deepseek-key");
     const parsedBody = JSON.parse(options.body);
     expect(parsedBody.model).toBe("deepseek-v4-flash");
+  });
+
+  it("maps reasoning_content to reasoning and never echoes it back", async () => {
+    const fetchMock = mockFetchOnce({
+      choices: [
+        { message: { role: "assistant", content: "ok", reasoning_content: "thinking..." }, finish_reason: "stop" },
+      ],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await chatCompletion({
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "assistant", content: "earlier", reasoning: "old thoughts", provider_state: { x: 1 } },
+      ],
+      reasoning: true,
+    });
+
+    expect(result.message.reasoning).toBe("thinking...");
+    const parsedBody = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(parsedBody.thinking).toEqual({ type: "enabled" });
+    expect(parsedBody.messages[1]).toEqual({ role: "assistant", content: "earlier" });
   });
 
   it("passes through a custom model and tool definitions", async () => {
@@ -100,7 +121,7 @@ describe("deepseek.service chatCompletion", () => {
     expect(parsedBody.tool_choice).toBe("auto");
   });
 
-  it("throws DeepSeekApiError with details on a non-ok HTTP response", async () => {
+  it("throws LlmApiError with details on a non-ok HTTP response", async () => {
     vi.stubGlobal(
       "fetch",
       mockFetchOnce({ error: { message: "invalid api key" } }, 401, false)
@@ -109,29 +130,29 @@ describe("deepseek.service chatCompletion", () => {
     await expect(
       chatCompletion({ messages: [{ role: "user", content: "hi" }] })
     ).rejects.toMatchObject({
-      name: "DeepSeekApiError",
+      name: "LlmApiError",
       status: 401,
     });
   });
 
-  it("throws DeepSeekApiError on timeout (AbortError)", async () => {
+  it("throws LlmApiError on timeout (AbortError)", async () => {
     const abortError = new DOMException("Aborted", "AbortError");
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(abortError));
 
     await expect(
       chatCompletion({ messages: [{ role: "user", content: "hi" }] })
     ).rejects.toMatchObject({
-      name: "DeepSeekApiError",
+      name: "LlmApiError",
       status: 504,
     });
   });
 
-  it("throws DeepSeekApiError when response has no choices", async () => {
+  it("throws LlmApiError when response has no choices", async () => {
     vi.stubGlobal("fetch", mockFetchOnce({ choices: [] }));
 
     await expect(
       chatCompletion({ messages: [{ role: "user", content: "hi" }] })
-    ).rejects.toBeInstanceOf(DeepSeekApiError);
+    ).rejects.toBeInstanceOf(LlmApiError);
   });
 
   it("uses the real prompt_cache_hit/miss breakdown when DeepSeek returns it", async () => {
@@ -157,7 +178,7 @@ describe("deepseek.service chatCompletion", () => {
     expect(result.usage.cost_usd).toBeCloseTo(0.00000582, 10);
   });
 
-  it("passes response_format through to the request body", async () => {
+  it("maps json: true to response_format json_object", async () => {
     const fetchMock = mockFetchOnce({
       choices: [{ message: { role: "assistant", content: "{}" }, finish_reason: "stop" }],
       usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
@@ -166,7 +187,7 @@ describe("deepseek.service chatCompletion", () => {
 
     await chatCompletion({
       messages: [{ role: "user", content: "hi" }],
-      response_format: { type: "json_object" },
+      json: true,
     });
 
     const [, options] = fetchMock.mock.calls[0];

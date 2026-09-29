@@ -1,4 +1,4 @@
-import { chatCompletion, DEFAULT_MODEL, DeepSeekMessage, DeepSeekUsage } from "./deepseek.service";
+import { chatCompletion, defaultModel, LlmMessage, LlmUsage } from "./llm.service";
 
 export const DEFAULT_SYSTEM_PROMPT =
   "You are a direct-response B2B copywriter for an outbound sales/GTM agency. " +
@@ -15,7 +15,7 @@ export interface GenerateCopyParams {
    * A JSON structure/shape describing the desired output (either a literal example
    * object or a JSON-Schema-like object). When set, the model is instructed to reply
    * with only a JSON object matching it and `response` is the parsed object instead
-   * of a string. Best-effort: DeepSeek guarantees valid JSON syntax, not schema
+   * of a string. Best-effort: the model guarantees valid JSON syntax, not schema
    * conformance — malformed output falls back to the raw string plus a `warning`.
    */
   response_schema?: unknown;
@@ -24,14 +24,14 @@ export interface GenerateCopyParams {
 export interface GenerateCopyResult {
   response: string | unknown;
   model: string;
-  usage: DeepSeekUsage;
+  usage: LlmUsage;
   warning?: string;
 }
 
 export async function generateCopy(params: GenerateCopyParams): Promise<GenerateCopyResult> {
-  const usedModel = params.model?.trim() ? params.model.trim() : DEFAULT_MODEL;
+  const usedModel = params.model?.trim() ? params.model.trim() : defaultModel();
 
-  const messages: DeepSeekMessage[] = [
+  const messages: LlmMessage[] = [
     {
       role: "system",
       content: params.system?.trim() ? params.system : DEFAULT_SYSTEM_PROMPT,
@@ -56,23 +56,28 @@ export async function generateCopy(params: GenerateCopyParams): Promise<Generate
     model: usedModel,
     temperature: params.temperature,
     max_tokens: params.max_tokens,
-    response_format: wantsStructured ? { type: "json_object" } : undefined,
+    json: wantsStructured,
   });
 
-  const rawContent = result.choice.message.content ?? "";
+  const rawContent = result.message.content ?? "";
+  const paramWarning = result.warnings?.join(" ");
 
   if (wantsStructured) {
     try {
-      return { response: JSON.parse(rawContent), model: usedModel, usage: result.usage };
+      return withWarning({ response: JSON.parse(rawContent), model: usedModel, usage: result.usage }, paramWarning);
     } catch {
-      return {
-        response: rawContent,
-        model: usedModel,
-        usage: result.usage,
-        warning: "DeepSeek did not return valid JSON; returning raw text in `response`.",
-      };
+      return withWarning(
+        { response: rawContent, model: usedModel, usage: result.usage },
+        "The model did not return valid JSON; returning raw text in `response`.",
+        paramWarning
+      );
     }
   }
 
-  return { response: rawContent, model: usedModel, usage: result.usage };
+  return withWarning({ response: rawContent, model: usedModel, usage: result.usage }, paramWarning);
+}
+
+function withWarning(result: GenerateCopyResult, ...warnings: (string | undefined)[]): GenerateCopyResult {
+  const warning = warnings.filter(Boolean).join(" ");
+  return warning ? { ...result, warning } : result;
 }

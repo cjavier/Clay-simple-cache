@@ -1,4 +1,5 @@
 import prisma from "../db/prisma";
+import { activeProvider } from "./llm.service";
 
 /**
  * Balance monitor for every paid API the service depends on.
@@ -238,10 +239,12 @@ async function checkSerper(burnPerDay: number): Promise<CreditCheck> {
 
 // ─── DeepSeek ───────────────────────────────────────────────
 
+const LLM_IMPACT = "Endpoints /copy y /explore";
+
 async function checkDeepSeek(): Promise<CreditCheck> {
   const key = process.env.DEEPSEEK_API_KEY || "";
   const label = "DeepSeek";
-  const impact = "Endpoints /copy y /explore";
+  const impact = LLM_IMPACT;
   if (!key) return unreadable("deepseek", label, impact, "API key no configurada");
 
   try {
@@ -279,6 +282,59 @@ async function checkDeepSeek(): Promise<CreditCheck> {
   }
 }
 
+// ─── OpenAI ─────────────────────────────────────────────────
+
+/**
+ * OpenAI exposes no balance to a regular API key (billing needs an admin key),
+ * so probe instead: a tiny request against the model the service actually
+ * uses. That catches the failures that matter — bad key, no access to the
+ * model, exhausted quota (429 insufficient_quota) — at a fraction of a cent.
+ */
+async function checkOpenAI(): Promise<CreditCheck> {
+  const key = process.env.OPENAI_API_KEY || "";
+  const label = "OpenAI";
+  const impact = LLM_IMPACT;
+  if (!key) return unreadable("openai", label, impact, "API key no configurada");
+
+  const model = activeProvider().defaultModel();
+  try {
+    const { ok, status, body } = await getJson("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+      body: JSON.stringify({ model, input: "ping", max_output_tokens: 16, reasoning: { effort: "none" }, store: false }),
+    });
+    if (!ok) {
+      const code = body?.error?.code || body?.error?.type;
+      const error =
+        code === "insufficient_quota"
+          ? "Sin créditos"
+          : status === 401
+          ? "API key inválida"
+          : body?.error?.message || `HTTP ${status}`;
+      return { ...unreadable("openai", label, impact, error, body), balance: code === "insufficient_quota" ? 0 : null };
+    }
+    return {
+      provider: "openai",
+      label,
+      impact,
+      status: "green",
+      // Reachable and billing, but the balance itself isn't readable.
+      balance: null,
+      unit: "unknown",
+      days_left: null,
+      error: null,
+      raw: { model, status: body?.status, usage: body?.usage },
+    };
+  } catch (e: any) {
+    return unreadable("openai", label, impact, e?.message || "Error de red");
+  }
+}
+
+/** Only the provider /copy and /explore are actually using needs to be alive. */
+function checkLlm(): Promise<CreditCheck> {
+  return activeProvider().name === "deepseek" ? checkDeepSeek() : checkOpenAI();
+}
+
 // ─── Orchestration ──────────────────────────────────────────
 
 export interface CreditReport {
@@ -303,7 +359,7 @@ export async function checkAllCredits(): Promise<CreditReport> {
     checkEmailListVerify(burn.verifications),
     checkDebounce(burn.verifications),
     checkSerper(burn.searches),
-    checkDeepSeek(),
+    checkLlm(),
   ]);
   return {
     checks,

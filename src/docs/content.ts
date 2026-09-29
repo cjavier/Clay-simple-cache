@@ -14,7 +14,7 @@ This API is the internal data & automation backbone for a GTM (go-to-market) out
 - A **Tech Detector** that fingerprints a website's stack (CMS, ecommerce, analytics, ads, CRM, payments, etc.).
 - A **LinkedIn Finder** that resolves a company domain to its LinkedIn company page.
 - Per-client **Do Not Contact (DNC)** lists (individual emails or whole domains), with an optional \`dnc_client\` gate on the read/lookup endpoints.
-- Two **AI endpoints** backed by DeepSeek: \`/copy\` (single-shot copywriting) and \`/explore\` (a tool-using research agent with web search + page fetch).
+- Two **AI endpoints** backed by the configured LLM (OpenAI \`gpt-6-luna\` by default, DeepSeek via \`LLM_PROVIDER=deepseek\`): \`/copy\` (single-shot copywriting) and \`/explore\` (a tool-using research agent with web search + page fetch).
 
 <a id="authentication"></a>
 ## 2. Authentication
@@ -57,7 +57,7 @@ curl -H "Authorization: Bearer your_secret_key" {{BASE_URL}}/profiles?email=test
   - [\`POST /clients\`](#clients-post) · [\`GET /clients\`](#clients-get)
   - [\`POST /dnc\`](#dnc-post) · [\`POST /dnc/check\`](#dnc-check-post) · [\`GET /dnc\`](#dnc-get)
   - [\`dnc_client\` semantics](#dnc-client-semantics)
-- [11. AI — Copy & Explore (DeepSeek)](#ai)
+- [11. AI — Copy & Explore](#ai)
   - [\`POST /copy\`](#copy-post) · [\`POST /explore\`](#explore-post)
 - [12. MCP Server](#mcp-server)
 - [13. Errors & Limits](#errors-and-limits)
@@ -90,8 +90,8 @@ curl -H "Authorization: Bearer your_secret_key" {{BASE_URL}}/profiles?email=test
 | \`POST\` | \`/dnc\` | Upload entries to a client's DNC list. | [Clients & DNC](#dnc-post) |
 | \`POST\` | \`/dnc/check\` | Check if an email is on a client's DNC list. | [Clients & DNC](#dnc-check-post) |
 | \`GET\` | \`/dnc\` | List a client's DNC entries. | [Clients & DNC](#dnc-get) |
-| \`POST\` | \`/copy\` | Generate copy from a prompt (DeepSeek). | [AI](#copy-post) |
-| \`POST\` | \`/explore\` | Run a research agent (SERP + page fetch, DeepSeek). | [AI](#explore-post) |
+| \`POST\` | \`/copy\` | Generate copy from a prompt (LLM). | [AI](#copy-post) |
+| \`POST\` | \`/explore\` | Run a research agent (SERP + page fetch, LLM). | [AI](#explore-post) |
 | \`POST\` | \`/mcp\` | MCP (Model Context Protocol) JSON-RPC endpoint — Streamable HTTP, stateless. | [MCP Server](#mcp-server) |
 | \`GET\`/\`DELETE\` | \`/mcp\` | \`405\` — this MCP server is stateless (no sessions to fetch/delete). | [MCP Server](#mcp-server) |
 | \`GET\` | \`/llms.txt\` | Machine-readable service summary for LLM agents (no auth). | [MCP Server](#mcp-server) |
@@ -435,7 +435,7 @@ The \`_overall\` row carries cost and latency; the per-verdict rows carry accura
 No params. Probes every paid provider's balance endpoint **live** on each call, so this is a real health check, not a cached view. Status is per provider and rolls up to a top-level worst-case:
 
 - \`green\` — comfortable runway
-- \`yellow\` — under 10 days of runway at the measured burn rate (or under $20 for DeepSeek)
+- \`yellow\` — under 10 days of runway at the measured burn rate (or under $20 for DeepSeek; OpenAI is green/red only, since its balance isn't readable)
 - \`red\` — depleted, unreadable, key missing, or under 3 days of runway
 
 A provider that can't be read is **red**, never green: an unknown balance is not a safe one.
@@ -676,9 +676,9 @@ This lets a single call answer "do we have this contact, and are we even allowed
 ---
 
 <a id="ai"></a>
-## 11. AI — Copy & Explore (DeepSeek)
+## 11. AI — Copy & Explore
 
-Both endpoints call the DeepSeek chat completions API (OpenAI-compatible) and require \`DEEPSEEK_API_KEY\` to be configured server-side.
+Both endpoints call the LLM selected by \`LLM_PROVIDER\` on the server: \`openai\` (default — \`gpt-6-luna\` via the Responses API, needs \`OPENAI_API_KEY\`) or \`deepseek\` (\`deepseek-v4-flash\` via chat completions, needs \`DEEPSEEK_API_KEY\`). Request and response shapes are identical for both.
 
 <a id="copy-post"></a>
 ### \`POST /copy\` — Generate Copy
@@ -690,10 +690,10 @@ Single-shot prompt → copy generation, defaulted to a direct-response B2B outbo
 |---|---|---|---|---|
 | \`prompt\` | string | **Yes** | — | The user prompt/brief. |
 | \`system\` | string | No | Built-in B2B copywriter system prompt | Override the system prompt. |
-| \`model\` | string | No | \`"deepseek-v4-flash"\` | DeepSeek model name. |
-| \`temperature\` | number | No | provider default | Passed through to DeepSeek. |
-| \`max_tokens\` | number | No | provider default | Passed through to DeepSeek. |
-| \`response_schema\` | object | No | — | A JSON structure/shape describing the desired output (a literal example object works, e.g. \`{"description": "string", "top_problems": ["string","string","string"]}\`). When set, \`response\` is the **parsed JSON object** matching it instead of a plain string. Best-effort: DeepSeek guarantees valid JSON syntax, not schema conformance — if it returns malformed JSON, \`response\` falls back to the raw string and a \`warning\` field is added. |
+| \`model\` | string | No | active provider's default (\`"gpt-6-luna"\`) | Model name for the active provider. |
+| \`temperature\` | number | No | provider default | Passed through where supported. Reasoning models such as \`gpt-6-luna\` only allow their default; the value is then ignored and noted in \`warning\`. |
+| \`max_tokens\` | number | No | provider default | Max output tokens. On reasoning models this budget includes reasoning tokens, so very small values can yield an empty response. |
+| \`response_schema\` | object | No | — | A JSON structure/shape describing the desired output (a literal example object works, e.g. \`{"description": "string", "top_problems": ["string","string","string"]}\`). When set, \`response\` is the **parsed JSON object** matching it instead of a plain string. Best-effort: the model guarantees valid JSON syntax, not schema conformance — if it returns malformed JSON, \`response\` falls back to the raw string and a \`warning\` field is added. |
 
 \`\`\`bash
 curl -X POST {{BASE_URL}}/copy \\
@@ -705,7 +705,7 @@ curl -X POST {{BASE_URL}}/copy \\
 \`\`\`json
 {
   "response": "Hi {{first_name}} — noticed {{company}} just closed its Series B...",
-  "model": "deepseek-v4-flash",
+  "model": "gpt-6-luna",
   "usage": {
     "prompt_tokens": 120,
     "completion_tokens": 48,
@@ -717,7 +717,7 @@ curl -X POST {{BASE_URL}}/copy \\
   "duration_ms": 1450
 }
 \`\`\`
-\`usage.cost_usd\` is computed from DeepSeek's per-model token pricing (cache-hit/cache-miss input rates + output rate); it's \`null\` if a custom \`model\` isn't in the known pricing table.
+\`usage.cost_usd\` is computed from the active provider's per-model token pricing (cached/uncached input rates + output rate); it's \`null\` if a custom \`model\` isn't in the known pricing table.
 
 **Structured output example**:
 \`\`\`bash
@@ -734,26 +734,26 @@ curl -X POST {{BASE_URL}}/copy \\
     "description": "empresa.com runs a small support team handling tickets via email and chat.",
     "top_problems": ["Slow first response time", "No self-service knowledge base", "Inconsistent escalation process"]
   },
-  "model": "deepseek-v4-flash",
+  "model": "gpt-6-luna",
   "usage": { "...": "..." },
   "duration_ms": 1800
 }
 \`\`\`
 
-**Errors**: \`400\` \`{ "error": "prompt is required" }\`; \`400\` \`{ "error": "response_schema must be a JSON object" }\`; \`503\` \`{ "error": "DEEPSEEK_API_KEY is not configured" }\`; \`502\` \`{ "error": "DeepSeek API error (...)" }\` on upstream failure; \`500\` unexpected.
+**Errors**: \`400\` \`{ "error": "prompt is required" }\`; \`400\` \`{ "error": "response_schema must be a JSON object" }\`; \`503\` \`{ "error": "OPENAI_API_KEY is not configured" }\` (or \`DEEPSEEK_API_KEY\`, per provider); \`502\` \`{ "error": "OpenAI API error (...)" }\` on upstream failure; \`500\` unexpected.
 
 <a id="explore-post"></a>
 ### \`POST /explore\` — Research Agent
 
-Runs a tool-using agent loop: DeepSeek can call \`serp_search\` (Google via Serper) and \`fetch_page\` (fetch + strip HTML, SSRF-guarded — blocks localhost/private/link-local IPs and DNS-rebinding, 3 redirects max, ~8000-char truncation) until it produces a final answer.
+Runs a tool-using agent loop: the model can call \`serp_search\` (Google via Serper) and \`fetch_page\` (fetch + strip HTML, SSRF-guarded — blocks localhost/private/link-local IPs and DNS-rebinding, 3 redirects max, ~8000-char truncation) until it produces a final answer.
 
 **Body (JSON)**:
 | Field | Type | Required | Default | Description |
 |---|---|---|---|---|
 | \`prompt\` | string | **Yes** | — | The research question/task. |
 | \`max_steps\` | number | No | \`8\` | Max tool calls before forcing a final answer. Hard-capped at \`15\` regardless of the value sent. |
-| \`reasoning\` | boolean | No | \`true\` | DeepSeek thinking mode. When enabled, each step's \`reasoning\` carries the model's chain of thought. Set \`false\` for a slightly faster, non-reasoning run. |
-| \`model\` | string | No | \`"deepseek-v4-flash"\` | DeepSeek model name. |
+| \`reasoning\` | boolean | No | \`true\` | Reasoning mode. When enabled, each step's \`reasoning\` carries the model's reasoning (DeepSeek: full chain of thought; OpenAI: a reasoning summary, present only when the model actually reasoned). Set \`false\` for a slightly faster, non-reasoning run. |
+| \`model\` | string | No | active provider's default (\`"gpt-6-luna"\`) | Model name for the active provider. |
 | \`response_schema\` | object | No | — | A JSON structure/shape describing the desired final answer (e.g. \`{"answer": "string", "sources": ["string"]}\`). When set, the agent researches normally and then reformats its final answer with one extra (non-tool) model call — \`message\` becomes the **parsed JSON object** matching it instead of a plain string, and that extra call's tokens are included in \`usage\`. Best-effort, not schema-validated; malformed output falls back to \`{"error": "...", "raw": "..."}\`. |
 
 \`\`\`bash
@@ -782,14 +782,14 @@ curl -X POST {{BASE_URL}}/explore \\
   "duration_ms": 6200
 }
 \`\`\`
-Each step's \`reasoning\` is the assistant's message content accompanying that tool call (often empty). \`output_summary\` is the tool's JSON/text output truncated to 300 characters. \`usage.cost_usd\` is \`null\` if a custom \`model\` isn't in the known DeepSeek pricing table.
+Each step's \`reasoning\` is the model's reasoning for that tool call when available, else the message content that accompanied it (often empty). \`output_summary\` is the tool's JSON/text output truncated to 300 characters. \`usage.cost_usd\` is \`null\` if a custom \`model\` isn't in the active provider's pricing table.
 
 With \`response_schema\`, \`message\` looks like:
 \`\`\`json
 { "message": { "answer": "empresa.com uses HubSpot; their careers page has referenced it since at least 2023." }, "...": "..." }
 \`\`\`
 
-**Errors**: \`400\` \`{ "error": "prompt is required" }\`; \`400\` \`{ "error": "max_steps must be a positive number" }\`; \`400\` \`{ "error": "model must be a string" }\`; \`400\` \`{ "error": "response_schema must be a JSON object" }\`; \`503\` \`{ "error": "DEEPSEEK_API_KEY is not configured" }\`; \`502\` upstream DeepSeek failure; \`500\` unexpected.
+**Errors**: \`400\` \`{ "error": "prompt is required" }\`; \`400\` \`{ "error": "max_steps must be a positive number" }\`; \`400\` \`{ "error": "model must be a string" }\`; \`400\` \`{ "error": "response_schema must be a JSON object" }\`; \`503\` \`{ "error": "OPENAI_API_KEY is not configured" }\` (or \`DEEPSEEK_API_KEY\`, per provider); \`502\` upstream LLM failure; \`500\` unexpected.
 
 ---
 
@@ -820,7 +820,7 @@ This service is also exposed as an [MCP (Model Context Protocol)](https://modelc
 | \`dnc_check\` | \`{client,email}\` | Read-only Do Not Contact check — call before contacting a lead in a client campaign. |
 | \`dnc_add\` | \`{client,list_type,entries[]}\` | Add emails/domains to a client's Do Not Contact list. |
 | \`dnc_list\` | \`{client,list_type?}\` | Read-only listing of a client's Do Not Contact entries. |
-| \`generate_copy\` | \`{prompt,system?,temperature?,max_tokens?,response_schema?}\` | Generate B2B outbound copy via DeepSeek. Returns token usage + \`cost_usd\`; with \`response_schema\`, \`response\` is a parsed JSON object. |
+| \`generate_copy\` | \`{prompt,system?,temperature?,max_tokens?,response_schema?}\` | Generate B2B outbound copy via the active LLM. Returns token usage + \`cost_usd\`; with \`response_schema\`, \`response\` is a parsed JSON object. |
 | \`explore\` | \`{prompt,max_steps?,response_schema?}\` | Run a web-research agent (SERP + page fetch) and return its findings, token usage + \`cost_usd\`. With \`response_schema\`, \`message\` is a parsed JSON object. |
 | \`get_stats\` | \`{}\` | Read-only aggregate email finder usage/cost metrics. |
 
@@ -862,8 +862,8 @@ See also \`GET /llms.txt\` for a compact, plain-text version of this whole page 
 | \`409\` | \`POST /clients\` — handle already taken. |
 | \`429\` | Rate limit exceeded (see below). |
 | \`500\` | Unexpected server error, or missing \`API_KEY\` server config. |
-| \`502\` | Upstream provider failure (DeepSeek). |
-| \`503\` | Required upstream API key not configured (DeepSeek, or Serper for \`/find-linkedin\`). |
+| \`502\` | Upstream provider failure (the active LLM provider). |
+| \`503\` | Required upstream API key not configured (the active LLM provider, or Serper for \`/find-linkedin\`). |
 | \`504\` | Target URL timed out (\`/detect-tech\`, 15s limit). |
 
 **Rate limits** (per IP, sliding 60s window, \`express-rate-limit\` with \`RateLimit-*\` response headers):

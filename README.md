@@ -1,6 +1,6 @@
 # Clay Cache API
 
-Identity cache, email finder, tech stack detection, LinkedIn resolution, per-client Do Not Contact (DNC) lists, and DeepSeek-backed AI endpoints (copy generation + a web-research agent) for a GTM outbound agency. Allows upserting People/Company records based on normalized keys and merging enrichment data into a unified record over time.
+Identity cache, email finder, tech stack detection, LinkedIn resolution, per-client Do Not Contact (DNC) lists, and LLM-backed AI endpoints (copy generation + a web-research agent; OpenAI gpt-6-luna by default, DeepSeek with one env var) for a GTM outbound agency. Allows upserting People/Company records based on normalized keys and merging enrichment data into a unified record over time.
 
 Consumed both as a REST API and as an [MCP server](#mcp-server--agent-access) (Streamable HTTP), so it's built to be driven directly by AI agents (Claude Code, claude.ai, etc.) as much as by traditional backend code.
 
@@ -41,14 +41,15 @@ Full endpoint reference (request/response shapes, error codes, curl examples, an
 - **Clients & Do Not Contact (DNC)**:
   - Register clients under a readable `handle` (derived from `name`).
   - Per-client DNC lists (`individual` emails or whole `domain`s); an optional `dnc_client` param on `GET /profiles`, `GET /companies`, `POST /find`, and `POST /verify` gates the lookup behind the client's DNC list in a single call.
-- **AI (DeepSeek)**:
+- **AI (OpenAI gpt-6-luna by default — swappable to DeepSeek)**:
+  - The provider is one env var: `LLM_PROVIDER=openai` (default) or `LLM_PROVIDER=deepseek`. Both endpoints and the MCP tools go through `src/services/llm.service.ts`, which dispatches to `openai.service.ts` (Responses API) or `deepseek.service.ts` (chat completions). Request/response shapes don't change when you switch.
   - `POST /copy` — single-shot prompt → outbound copy generation.
   - `POST /explore` — a tool-using research agent (Google search + page fetch, SSRF-guarded) that answers open-ended questions with sourced reasoning steps.
-  - Both return `usage` (prompt/completion/cached tokens) and `usage.cost_usd` (computed from DeepSeek's per-model pricing).
+  - Both return `usage` (prompt/completion/cached tokens) and `usage.cost_usd` (computed from the active provider's per-model pricing).
   - Both accept an optional `response_schema` — a JSON shape describing the desired output — to get back parsed structured JSON (e.g. `{description, top_problems: [...]}`) instead of a single free-text string.
 - **Provider Credit Monitor**:
-  - `GET /credits` — live green/yellow/red balance for every paid API (EmailListVerify, DeBounce, Serper, DeepSeek).
-  - Status is runway-based: it divides each balance by the burn rate measured from `search_log`, so `yellow` means "under 10 days left at current usage", not an arbitrary number. DeepSeek uses USD floors instead, since its spend isn't logged.
+  - `GET /credits` — live green/yellow/red balance for every paid API (EmailListVerify, DeBounce, Serper, and the active LLM provider).
+  - Status is runway-based: it divides each balance by the burn rate measured from `search_log`, so `yellow` means "under 10 days left at current usage", not an arbitrary number. DeepSeek uses USD floors instead, since its spend isn't logged. OpenAI exposes no balance to a regular API key, so it's probed with a tiny request instead: green if it answers, red on a bad key or exhausted quota (`insufficient_quota`).
   - A provider that can't be read — bad key, network error, missing key — is reported **red**, never green.
   - Runs daily at 14:00 UTC (08:00 CDMX) — before the day's campaigns — recording every check in `provider_credits` and posting to Slack when something is wrong or has just recovered. All-green runs stay silent on purpose.
   - The daily run is scheduled **inside the API process** (`src/jobs/credit-check-schedule.ts`), enabled with `CREDIT_CHECK_DAILY=true`. It was a separate Railway cron service first, but that fired exactly once: a schedule set through the dashboard/API binds to the deployment that existed at that moment, so every later deploy produced one with no cron and the check silently stopped. A monitor that doesn't run is worse than none, because it looks like coverage. This service is already up 24/7, so the schedule is plain code — it survives every deploy and the timing is unit-tested.
@@ -80,7 +81,12 @@ Full endpoint reference (request/response shapes, error codes, curl examples, an
    | `EMAILLISTVERIFY_API_KEY` | **Yes** (for Email Finder) | Tier 1 email verification provider. |
    | `DEBOUNCE_API_KEY` | **Yes** (for Email Finder) | Tier 2 email verification provider. |
    | `SERPER_API_KEY` | **Yes** (for Email Finder, LinkedIn Finder, Explore agent) | google.serper.dev — SERP pattern discovery, domain→LinkedIn resolution, and the `serp_search` tool. |
-   | `DEEPSEEK_API_KEY` | **Yes** (for `/copy`, `/explore`) | DeepSeek chat completions API. Missing key returns `503` from those two endpoints only; the rest of the API works without it. |
+   | `LLM_PROVIDER` | No (default `openai`) | Which LLM backs `/copy`, `/explore` and the MCP AI tools: `openai` or `deepseek`. Only the active provider's key is needed. |
+   | `OPENAI_API_KEY` | **Yes** if `LLM_PROVIDER=openai` | OpenAI Responses API. Missing key returns `503` from `/copy` and `/explore` only; the rest of the API works without it. |
+   | `OPENAI_MODEL` | No (default `gpt-6-luna`) | Default OpenAI model. |
+   | `OPENAI_REASONING_EFFORT` | No (default `medium`) | `reasoning.effort` used when reasoning is on (`low`, `medium`, `high`, `xhigh`, `max`). |
+   | `DEEPSEEK_API_KEY` | **Yes** if `LLM_PROVIDER=deepseek` | DeepSeek chat completions API. |
+   | `DEEPSEEK_MODEL` | No (default `deepseek-v4-flash`) | Default DeepSeek model. |
    | `SLACK_TOKEN` | No (needed for credit alerts) | Slack bot token (`xoxb-…`) with `chat:write`. Used only by `src/jobs/check-credits.ts`. |
    | `SLACK_ALERT_CHANNEL` | No (needed for credit alerts) | Slack channel ID to post balance alerts to, e.g. `C0BSJ09ESCQ`. |
    | `CREDIT_ALERT_RED_DAYS` | No (default `3`) | Runway in days below which a provider is red. |
@@ -158,8 +164,8 @@ See the full, always-current API reference at `GET /docs/api` (e.g. `http://loca
   - `POST /dnc/check`: Check an email against a client's DNC list. Returns `200` with `do_not_contact: true|false`.
   - `GET /dnc`: List a client's DNC entries (optional `?list_type=`).
 
-- **AI (DeepSeek)**
-  - `POST /copy`: Generate outbound copy from a prompt. Returns `503` if `DEEPSEEK_API_KEY` is unset, `502` on upstream failure. Optional `response_schema` returns `response` as parsed JSON matching that shape.
+- **AI (active LLM provider)**
+  - `POST /copy`: Generate outbound copy from a prompt. Returns `503` if the active provider's API key is unset, `502` on upstream failure. Optional `response_schema` returns `response` as parsed JSON matching that shape.
   - `POST /explore`: Run a tool-using research agent (`serp_search` + `fetch_page`, up to `max_steps` tool calls, default 8, hard cap 15). Returns the final message plus a step-by-step trace. Optional `response_schema` returns `message` as parsed JSON matching that shape.
 
 - **Misc**

@@ -18,6 +18,16 @@ function mockReqRes(body: any) {
   return { req, res };
 }
 
+
+// These tests exercise the DeepSeek wire format; openai-service.test.ts covers
+// the default OpenAI provider.
+beforeEach(() => {
+  vi.stubEnv("LLM_PROVIDER", "deepseek");
+});
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
+
 describe("copyController.generate", () => {
   const ORIGINAL_KEY = process.env.DEEPSEEK_API_KEY;
 

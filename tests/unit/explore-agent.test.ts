@@ -27,6 +27,16 @@ import {
   SsrfBlockedError,
 } from "../../src/services/explore-agent.service";
 
+
+// These tests exercise the DeepSeek wire format; openai-service.test.ts covers
+// the default OpenAI provider.
+beforeEach(() => {
+  vi.stubEnv("LLM_PROVIDER", "deepseek");
+});
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
+
 describe("fetch_page SSRF guard", () => {
   beforeEach(() => {
     mockLookup.mockReset();

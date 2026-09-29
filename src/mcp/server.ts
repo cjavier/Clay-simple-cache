@@ -20,7 +20,7 @@ import { clientService } from "../services/client.service";
 import { findEmail, verifySingleEmail } from "../email-finder";
 import { detectTechnologies, FetchFailError } from "../services/tech-detector.service";
 import { findLinkedInForDomain } from "../services/linkedin-finder.service";
-import { DeepSeekApiError, DeepSeekConfigError } from "../services/deepseek.service";
+import { LlmApiError, LlmConfigError } from "../services/llm.service";
 import { runExploreAgent } from "../services/explore-agent.service";
 import { generateCopy } from "../services/copy.service";
 
@@ -934,13 +934,14 @@ export function buildMcpServer(): McpServer {
       title: "Generate Copy",
       description:
         "Generate B2B outbound copy (cold email, LinkedIn message, ad copy, etc.) from a prompt, via " +
-        "DeepSeek. Defaults to a direct-response B2B copywriter persona; override with `system` for a " +
-        "different voice. Requires DEEPSEEK_API_KEY configured server-side.",
+        "the configured LLM (OpenAI gpt-6-luna by default). Defaults to a direct-response B2B copywriter " +
+        "persona; override with `system` for a different voice. Requires the LLM provider's API key " +
+        "configured server-side.",
       inputSchema: {
         prompt: z.string().describe("The brief/prompt describing the copy to generate."),
         system: z.string().optional().describe("Override the default B2B copywriter system prompt."),
-        temperature: z.number().optional().describe("Sampling temperature, passed through to DeepSeek."),
-        max_tokens: z.number().optional().describe("Max output tokens, passed through to DeepSeek."),
+        temperature: z.number().optional().describe("Sampling temperature. Ignored (with a warning) by reasoning models such as gpt-6-luna."),
+        max_tokens: z.number().optional().describe("Max output tokens (reasoning tokens count against it on reasoning models)."),
         response_schema: z
           .record(z.string(), z.unknown())
           .optional()
@@ -964,11 +965,11 @@ export function buildMcpServer(): McpServer {
         const result = await generateCopy({ prompt, system, temperature, max_tokens, response_schema });
         return ok(result);
       } catch (error: any) {
-        if (error instanceof DeepSeekConfigError) {
-          return fail(`DeepSeek is not configured: ${error.message}`);
+        if (error instanceof LlmConfigError) {
+          return fail(`LLM is not configured: ${error.message}`);
         }
-        if (error instanceof DeepSeekApiError) {
-          return fail(`DeepSeek API error: ${error.message}`);
+        if (error instanceof LlmApiError) {
+          return fail(error.message);
         }
         throw error;
       }
@@ -983,7 +984,7 @@ export function buildMcpServer(): McpServer {
       description:
         "Run a tool-using research agent that can search Google (SERP) and fetch/read web pages to answer " +
         "an open-ended question, e.g. 'what CRM does empresa.com use?'. Returns the agent's final answer plus " +
-        "a step-by-step trace of what it searched/read. Requires DEEPSEEK_API_KEY configured server-side.",
+        "a step-by-step trace of what it searched/read. Requires the LLM provider's API key configured server-side.",
       inputSchema: {
         prompt: z.string().describe("The research question or task."),
         max_steps: z
@@ -1017,11 +1018,11 @@ export function buildMcpServer(): McpServer {
         const result = await runExploreAgent({ prompt, max_steps, response_schema });
         return ok(result);
       } catch (error: any) {
-        if (error instanceof DeepSeekConfigError) {
-          return fail(`DeepSeek is not configured: ${error.message}`);
+        if (error instanceof LlmConfigError) {
+          return fail(`LLM is not configured: ${error.message}`);
         }
-        if (error instanceof DeepSeekApiError) {
-          return fail(`DeepSeek API error: ${error.message}`);
+        if (error instanceof LlmApiError) {
+          return fail(error.message);
         }
         throw error;
       }
@@ -1095,8 +1096,8 @@ export function buildMcpServer(): McpServer {
     {
       title: "Check Provider Credits",
       description:
-        "Live green/yellow/red balance check of every paid provider (EmailListVerify, DeBounce, Serper, " +
-        "DeepSeek). Call this FIRST when find_email or verify_email keep returning status \"unknown\": a " +
+        "Live green/yellow/red balance check of every paid provider (EmailListVerify, DeBounce, Serper, and " +
+        "the active LLM provider — OpenAI or DeepSeek). Call this FIRST when find_email or verify_email keep returning status \"unknown\": a " +
         "provider with no balance returns \"unknown\", which is indistinguishable from \"this email does " +
         "not exist\". A provider that cannot be read is reported red, never green.",
       inputSchema: {},

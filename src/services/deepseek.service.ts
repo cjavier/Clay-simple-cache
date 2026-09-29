@@ -1,71 +1,24 @@
 /**
- * Thin client for the DeepSeek chat completions API (OpenAI-compatible).
+ * DeepSeek adapter for the LLM layer — chat completions API (OpenAI-compatible).
  * Docs: https://api-docs.deepseek.com
+ *
+ * Selected with LLM_PROVIDER=deepseek. Callers use llm.service.ts, not this file.
  */
+
+import {
+  ChatCompletionParams,
+  ChatCompletionResult,
+  LlmApiError,
+  LlmConfigError,
+  LlmMessage,
+  LlmProvider,
+} from "./llm.types";
 
 const DEEPSEEK_BASE_URL = "https://api.deepseek.com";
 // "deepseek-chat"/"deepseek-reasoner" aliases are deprecated 2026-07-24;
 // deepseek-v4-flash is the same model the aliases resolved to.
-export const DEFAULT_MODEL = process.env.DEEPSEEK_MODEL || "deepseek-v4-flash";
+const FALLBACK_MODEL = "deepseek-v4-flash";
 const REQUEST_TIMEOUT_MS = 120_000;
-
-export type DeepSeekRole = "system" | "user" | "assistant" | "tool";
-
-export interface DeepSeekToolCall {
-  id: string;
-  type: "function";
-  function: {
-    name: string;
-    arguments: string;
-  };
-}
-
-export interface DeepSeekMessage {
-  role: DeepSeekRole;
-  content: string | null;
-  /** Chain-of-thought text returned when thinking mode is enabled. Never send it back to the API. */
-  reasoning_content?: string;
-  tool_calls?: DeepSeekToolCall[];
-  tool_call_id?: string;
-  name?: string;
-}
-
-export interface DeepSeekThinking {
-  type: "enabled" | "disabled";
-  reasoning_effort?: "high" | "max";
-}
-
-export interface DeepSeekTool {
-  type: "function";
-  function: {
-    name: string;
-    description?: string;
-    parameters: Record<string, unknown>;
-  };
-}
-
-export type DeepSeekToolChoice =
-  | "auto"
-  | "none"
-  | "required"
-  | { type: "function"; function: { name: string } };
-
-export interface DeepSeekResponseFormat {
-  /** `json_object` guarantees syntactically valid JSON; it does not enforce a specific shape. */
-  type: "text" | "json_object";
-}
-
-export interface DeepSeekUsage {
-  prompt_tokens: number;
-  completion_tokens: number;
-  total_tokens: number;
-  /** Prompt tokens billed at the (cheaper) context-cache-hit rate. */
-  prompt_cache_hit_tokens: number;
-  /** Prompt tokens billed at the standard cache-miss rate. */
-  prompt_cache_miss_tokens: number;
-  /** Computed from `DEEPSEEK_PRICING`; `null` if `model` isn't in that table. */
-  cost_usd: number | null;
-}
 
 export interface DeepSeekModelPricing {
   /** USD per 1,000,000 input tokens that hit the context cache. */
@@ -102,63 +55,30 @@ export function calculateCostUsd(
   return Math.round(cost * 1e8) / 1e8;
 }
 
-export interface DeepSeekChatChoice {
-  message: DeepSeekMessage;
-  finish_reason: string;
+// The API rejects reasoning_content when echoed back, and provider_state is
+// ours — strip both before sending history.
+function toWireMessage({ reasoning: _r, provider_state: _p, ...rest }: LlmMessage): Record<string, unknown> {
+  return rest;
 }
 
-export interface DeepSeekChatCompletionResult {
-  choice: DeepSeekChatChoice;
-  usage: DeepSeekUsage;
-}
-
-export interface ChatCompletionParams {
-  messages: DeepSeekMessage[];
-  model?: string;
-  temperature?: number;
-  max_tokens?: number;
-  tools?: DeepSeekTool[];
-  tool_choice?: DeepSeekToolChoice;
-  thinking?: DeepSeekThinking;
-  response_format?: DeepSeekResponseFormat;
-}
-
-/** Thrown when DEEPSEEK_API_KEY is missing from the environment. */
-export class DeepSeekConfigError extends Error {
-  constructor(message = "DEEPSEEK_API_KEY is not configured") {
-    super(message);
-    this.name = "DeepSeekConfigError";
-  }
-}
-
-/** Thrown for any HTTP/network failure talking to the DeepSeek API. */
-export class DeepSeekApiError extends Error {
-  constructor(public readonly status: number, message: string) {
-    super(message);
-    this.name = "DeepSeekApiError";
-  }
-}
-
-export async function chatCompletion(
-  params: ChatCompletionParams
-): Promise<DeepSeekChatCompletionResult> {
+async function chatCompletion(params: ChatCompletionParams): Promise<ChatCompletionResult> {
   const apiKey = process.env.DEEPSEEK_API_KEY;
   if (!apiKey) {
-    throw new DeepSeekConfigError();
+    throw new LlmConfigError("DEEPSEEK_API_KEY is not configured");
   }
 
-  const model = params.model || DEFAULT_MODEL;
+  const model = params.model || deepseekProvider.defaultModel();
 
   const body: Record<string, unknown> = {
     model,
-    messages: params.messages,
+    messages: params.messages.map(toWireMessage),
   };
   if (params.temperature !== undefined) body.temperature = params.temperature;
   if (params.max_tokens !== undefined) body.max_tokens = params.max_tokens;
   if (params.tools) body.tools = params.tools;
   if (params.tool_choice) body.tool_choice = params.tool_choice;
-  if (params.thinking) body.thinking = params.thinking;
-  if (params.response_format) body.response_format = params.response_format;
+  if (params.reasoning !== undefined) body.thinking = { type: params.reasoning ? "enabled" : "disabled" };
+  if (params.json) body.response_format = { type: "json_object" };
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -176,15 +96,9 @@ export async function chatCompletion(
     });
   } catch (error: any) {
     if (error?.name === "AbortError") {
-      throw new DeepSeekApiError(
-        504,
-        `DeepSeek request timed out after ${REQUEST_TIMEOUT_MS / 1000}s`
-      );
+      throw new LlmApiError(504, `DeepSeek request timed out after ${REQUEST_TIMEOUT_MS / 1000}s`);
     }
-    throw new DeepSeekApiError(
-      502,
-      `DeepSeek request failed: ${error?.message || "network error"}`
-    );
+    throw new LlmApiError(502, `DeepSeek request failed: ${error?.message || "network error"}`);
   } finally {
     clearTimeout(timeoutId);
   }
@@ -197,7 +111,7 @@ export async function chatCompletion(
     } catch {
       detail = await response.text().catch(() => "");
     }
-    throw new DeepSeekApiError(
+    throw new LlmApiError(
       response.status,
       `DeepSeek API error (${response.status}): ${detail || response.statusText}`
     );
@@ -207,12 +121,12 @@ export async function chatCompletion(
   try {
     data = await response.json();
   } catch (error: any) {
-    throw new DeepSeekApiError(502, "DeepSeek returned an invalid JSON response");
+    throw new LlmApiError(502, "DeepSeek returned an invalid JSON response");
   }
 
   const rawChoice = data?.choices?.[0];
   if (!rawChoice) {
-    throw new DeepSeekApiError(502, "DeepSeek response contained no choices");
+    throw new LlmApiError(502, "DeepSeek response contained no choices");
   }
 
   const promptTokens = data?.usage?.prompt_tokens ?? 0;
@@ -222,11 +136,11 @@ export async function chatCompletion(
   // more expensive assumption) if DeepSeek doesn't return the cache breakdown.
   const promptCacheMissTokens = data?.usage?.prompt_cache_miss_tokens ?? promptTokens - promptCacheHitTokens;
 
+  const { reasoning_content, ...rawMessage } = rawChoice.message ?? {};
+
   return {
-    choice: {
-      message: rawChoice.message,
-      finish_reason: rawChoice.finish_reason,
-    },
+    message: { ...rawMessage, reasoning: reasoning_content || undefined },
+    finish_reason: rawChoice.finish_reason,
     usage: {
       prompt_tokens: promptTokens,
       completion_tokens: completionTokens,
@@ -237,3 +151,10 @@ export async function chatCompletion(
     },
   };
 }
+
+export const deepseekProvider: LlmProvider = {
+  name: "deepseek",
+  label: "DeepSeek",
+  defaultModel: () => process.env.DEEPSEEK_MODEL || FALLBACK_MODEL,
+  chatCompletion,
+};

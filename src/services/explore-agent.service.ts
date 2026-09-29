@@ -3,10 +3,11 @@ import { lookup as dnsLookup } from "dns/promises";
 import { config } from "../email-finder/config";
 import {
   chatCompletion,
-  DeepSeekMessage,
-  DeepSeekTool,
-  DeepSeekUsage,
-} from "./deepseek.service";
+  emptyUsage,
+  LlmMessage,
+  LlmTool,
+  LlmUsage,
+} from "./llm.service";
 
 // ---------------------------------------------------------------------------
 // Tool: serp_search
@@ -285,7 +286,7 @@ const SYSTEM_PROMPT =
   "before answering. When you have enough information, respond with a clear, direct final answer and " +
   "do not call any more tools.";
 
-const TOOLS: DeepSeekTool[] = [
+const TOOLS: LlmTool[] = [
   {
     type: "function",
     function: {
@@ -333,7 +334,7 @@ export interface ExploreAgentResult {
   steps: ExploreStep[];
   total_steps: number;
   duration_ms: number;
-  usage: DeepSeekUsage;
+  usage: LlmUsage;
 }
 
 export interface RunExploreAgentParams {
@@ -376,21 +377,24 @@ function stripToolCallMarkup(content: string): string {
     .trim();
 }
 
-function addUsage(total: DeepSeekUsage, delta: DeepSeekUsage): void {
+function addUsage(total: LlmUsage, delta: LlmUsage): void {
   total.prompt_tokens += delta.prompt_tokens || 0;
   total.completion_tokens += delta.completion_tokens || 0;
   total.total_tokens += delta.total_tokens || 0;
   total.prompt_cache_hit_tokens += delta.prompt_cache_hit_tokens || 0;
   total.prompt_cache_miss_tokens += delta.prompt_cache_miss_tokens || 0;
   // Null means "cost unknown for at least one call" (e.g. a custom, unpriced model) — stays null once set.
-  total.cost_usd = total.cost_usd === null || delta.cost_usd === null ? null : total.cost_usd + delta.cost_usd;
+  total.cost_usd =
+    total.cost_usd === null || delta.cost_usd === null
+      ? null
+      : Math.round((total.cost_usd + delta.cost_usd) * 1e8) / 1e8;
 }
 
 function parseStructuredResponse(raw: string | null | undefined): Record<string, unknown> {
   try {
     return JSON.parse(raw || "{}");
   } catch {
-    return { error: "DeepSeek did not return valid JSON for the requested structure.", raw: raw ?? "" };
+    return { error: "The model did not return valid JSON for the requested structure.", raw: raw ?? "" };
   }
 }
 
@@ -405,20 +409,13 @@ export async function runExploreAgent(
       : DEFAULT_MAX_STEPS;
   const maxSteps = Math.min(requestedMaxSteps, HARD_MAX_STEPS);
 
-  const messages: DeepSeekMessage[] = [
+  const messages: LlmMessage[] = [
     { role: "system", content: SYSTEM_PROMPT },
     { role: "user", content: params.prompt },
   ];
 
   const steps: ExploreStep[] = [];
-  const usage: DeepSeekUsage = {
-    prompt_tokens: 0,
-    completion_tokens: 0,
-    total_tokens: 0,
-    prompt_cache_hit_tokens: 0,
-    prompt_cache_miss_tokens: 0,
-    cost_usd: 0,
-  };
+  const usage: LlmUsage = emptyUsage();
 
   let stepCount = 0;
   let finalMessage = "";
@@ -451,19 +448,18 @@ export async function runExploreAgent(
       model: params.model,
       tools: forceFinal ? undefined : TOOLS,
       tool_choice: forceFinal ? undefined : "auto",
-      // Reasoning mode improves research quality; v4 models support tool
-      // calls while thinking (verified against the live API).
-      thinking: { type: params.reasoning === false ? "disabled" : "enabled" },
+      // Reasoning mode improves research quality; both providers support
+      // tool calls while reasoning (verified against the live APIs).
+      reasoning: params.reasoning !== false,
     });
 
     addUsage(usage, result.usage);
 
-    const assistantMessage = result.choice.message;
-    // The API rejects reasoning_content when echoed back — keep it aside
-    // for step logging and push a sanitized copy into the history.
-    const reasoning = assistantMessage.reasoning_content;
-    const { reasoning_content: _omit, ...historyMessage } = assistantMessage;
-    messages.push(historyMessage as typeof assistantMessage);
+    // Push the message as-is: adapters strip `reasoning` before resending and
+    // need `provider_state` to replay the turn.
+    const assistantMessage = result.message;
+    const reasoning = assistantMessage.reasoning;
+    messages.push(assistantMessage);
 
     const toolCalls = assistantMessage.tool_calls;
     if (forceFinal || !toolCalls || toolCalls.length === 0) {
@@ -520,11 +516,11 @@ export async function runExploreAgent(
     const formatResult = await chatCompletion({
       messages,
       model: params.model,
-      response_format: { type: "json_object" },
-      thinking: { type: "disabled" },
+      json: true,
+      reasoning: false,
     });
     addUsage(usage, formatResult.usage);
-    message = parseStructuredResponse(formatResult.choice.message.content);
+    message = parseStructuredResponse(formatResult.message.content);
   }
 
   return {

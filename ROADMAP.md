@@ -20,7 +20,7 @@
 | Docs | `GET /docs/api` | HTML navegable |
 
 **En curso (este ciclo):**
-- `POST /copy` — generación de copy con DeepSeek (prompt → respuesta).
+- `POST /copy` — generación de copy con el LLM activo (OpenAI gpt-6-luna por defecto; DeepSeek con `LLM_PROVIDER=deepseek`).
 - `POST /explore` — agente de exploración con herramientas SERP + fetch de sitios; devuelve mensaje final + pasos + reasoning.
 - Check DNC integrado como parámetro `dnc_client` en `GET /profiles`, `GET /companies`, `POST /find`, `POST /verify` (si el contacto está vetado, la respuesta es solo `{ do_not_contact: true }` — no se filtran datos).
 - Auditoría de bugs + hardening + rediseño de la página de docs.
@@ -47,7 +47,7 @@ Sobre la base de `/copy` y `/explore`:
 - **`POST /personalize`** — el endpoint estrella para Clay/Instantly: recibe lead + empresa (o solo email/dominio y él mismo tira del caché/enrichment), scrapea el sitio, y devuelve `first_line`, `ps_line`, `subject` y variables de personalización listas para inyectar en la secuencia. Parámetros: tono, idioma, oferta del cliente, ejemplos few-shot por cliente.
 - **Perfiles de voz por cliente**: tabla `client_prompts` (asociada al handle) con system prompts, ofertas, casos de éxito y ejemplos aprobados. `/copy` y `/personalize` reciben `dnc_client`→`client` y cargan su voz automáticamente.
 - **`POST /sequence`** — genera la secuencia completa (3–5 correos + follow-ups) en formato compatible con Instantly (steps con `{{variables}}`).
-- **`POST /classify-reply`** — clasifica respuestas de prospectos (interesado / not now / unsubscribe / bounce / OOO) con DeepSeek; es la pieza que habilita automatizar el inbox (Fase 2). Las respuestas "unsubscribe" agregan automáticamente a la DNC del cliente.
+- **`POST /classify-reply`** — clasifica respuestas de prospectos (interesado / not now / unsubscribe / bounce / OOO) con el LLM activo; es la pieza que habilita automatizar el inbox (Fase 2). Las respuestas "unsubscribe" agregan automáticamente a la DNC del cliente.
 - **Batch**: versión `POST /personalize/batch` (async, ver jobs en Fase 3).
 
 ## 4. Fase 2 — Integración Instantly y ciclo de campaña (2–3 semanas)

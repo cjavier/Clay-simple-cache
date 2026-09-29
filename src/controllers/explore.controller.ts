@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
 import { runExploreAgent } from "../services/explore-agent.service";
-import { DeepSeekApiError, DeepSeekConfigError } from "../services/deepseek.service";
+import { LlmApiError, LlmConfigError } from "../services/llm.service";
 
 function isPlainObject(value: unknown): boolean {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -40,11 +40,11 @@ export const exploreController = {
 
       res.json(result);
     } catch (error: any) {
-      if (error instanceof DeepSeekConfigError) {
+      if (error instanceof LlmConfigError) {
         res.status(503).json({ error: error.message });
         return;
       }
-      if (error instanceof DeepSeekApiError) {
+      if (error instanceof LlmApiError) {
         res.status(502).json({ error: error.message });
         return;
       }
