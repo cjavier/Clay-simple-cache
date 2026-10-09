@@ -15,7 +15,7 @@ export const EMAIL_WATERFALL_KEY = "email_cascada";
 
 /** Custom-function routines need the `function:` prefix in Clay's public API. */
 export function clayEmailRoutineId(): string {
-  return process.env.CLAY_EMAIL_ROUTINE_ID || "function:t_0tmngxlhD8r7p6ZuRYZ";
+  return process.env.CLAY_EMAIL_ROUTINE_ID || "function:t_0tmngkoVgNYaHjSNmeY";
 }
 
 export function emailWaterfallColumn(routineId = clayEmailRoutineId()) {
