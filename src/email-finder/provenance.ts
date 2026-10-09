@@ -283,6 +283,42 @@ export interface ProvenanceEntry {
   method: string | null;
   origin: ProvenanceOrigin;
   checked_at: string;
+  /** What the finder knew; becomes the evidence row's `raw` on MailBridge. */
+  meta?: ProvenanceMeta | null;
+}
+
+/**
+ * The finder's own read of an address, for MailBridge's bounce-risk score
+ * (spec 105 reads exactly these keys from `raw`). Null when not known.
+ */
+export interface ProvenanceMeta {
+  send_recommendation: "send" | "risky" | "do_not_send" | null;
+  evidence_tier: string | null;
+  expected_bounce: number | null;
+  mail_gateway: string | null;
+  mx_provider: string | null;
+  pattern: string | null;
+  searched_name: { first: string | null; last: string | null } | null;
+}
+
+/** Build the meta of a pipeline answer. `null` when the answer carries none of it. */
+export function metaFromResult(
+  r: VerificationResult,
+  request?: { first_name?: string; last_name?: string; full_name?: string } | null
+): ProvenanceMeta | null {
+  const first = request?.first_name?.trim() || null;
+  const last = request?.last_name?.trim() || null;
+  const searched = first || last ? { first, last } : request?.full_name?.trim() ? { first: request.full_name.trim(), last: null } : null;
+  const meta: ProvenanceMeta = {
+    send_recommendation: r.send_recommendation ?? null,
+    evidence_tier: r.evidence ?? null,
+    expected_bounce: typeof r.expected_bounce === "number" ? r.expected_bounce : null,
+    mail_gateway: r.mail_gateway ?? null,
+    mx_provider: r.domain_info?.provider ?? null,
+    pattern: r.pattern ?? null,
+    searched_name: searched,
+  };
+  return Object.values(meta).some((v) => v !== null) ? meta : null;
 }
 
 /** A stable uuid from a string: re-posting the same claim must not create a second fact. */
@@ -350,13 +386,17 @@ export interface EvidenceRow {
 export function toEvidenceRows(e: ProvenanceEntry): EvidenceRow[] {
   const rows: EvidenceRow[] = [];
   const stem = e.origin === "verify" || e.origin === "backfill_cache" ? "verify" : e.origin === "ingest" ? "ingest" : "find";
-  const raw = { status: e.raw_status, method: e.method };
+  const raw = { status: e.raw_status, method: e.method, ...(e.meta ?? {}) };
+  // MailBridge reads confidence as "chance this address lands": the finder's
+  // measured bounce rate for its evidence beats a provider's self-reported score.
+  const eb = e.meta?.expected_bounce;
+  const confidence = typeof eb === "number" ? Math.round((1 - eb) * 1000) / 1000 : e.confidence;
   if (e.finder && PROVIDER_RE.test(e.finder)) {
     rows.push({
       email: e.email,
       kind: "found",
       provider: e.finder,
-      ...(e.verifier ? {} : { verdict: e.verdict, ...(e.confidence !== null ? { confidence: e.confidence } : {}) }),
+      ...(e.verifier ? {} : { verdict: e.verdict, ...(confidence !== null ? { confidence } : {}) }),
       sourceRef: `ccache:${stem}:${e.id}`,
       occurredAt: e.checked_at,
       raw,
@@ -368,7 +408,7 @@ export function toEvidenceRows(e: ProvenanceEntry): EvidenceRow[] {
       kind: "verified",
       provider: e.verifier,
       verdict: e.verdict,
-      ...(e.confidence !== null ? { confidence: e.confidence } : {}),
+      ...(confidence !== null ? { confidence } : {}),
       sourceRef: `ccache:verify:${e.id}`,
       occurredAt: e.checked_at,
       raw,

@@ -1,5 +1,6 @@
 import prisma from "../db/prisma";
 import { toEvidenceRows } from "../email-finder/provenance";
+import { EVIDENCE } from "../email-finder/outcomes";
 import { PushError, rowToEntry, sendEvidenceBatch, BATCH_ROWS } from "./evidence-push.service";
 
 /**
@@ -29,6 +30,26 @@ const VERDICT_SQL = (col: string) => `CASE ${col}
   WHEN 'risky' THEN 'risky' WHEN 'disposable' THEN 'risky' WHEN 'role_account' THEN 'risky'
   WHEN 'no_mx' THEN 'invalid' ELSE 'unknown' END`;
 
+/** evidence tier → its measured bounce rate, the same table the live finder uses. */
+const EXPECTED_BOUNCE_SQL = (col: string) =>
+  `CASE ${col} ${Object.entries(EVIDENCE)
+    .map(([tier, e]) => `WHEN '${tier}' THEN ${Number(e.expected_bounce)}`)
+    .join(" ")} END`;
+
+/** Gateway from the domain's MX hosts, as mailGateway() names them. */
+const GATEWAY_SQL = `CASE WHEN di.mx_records::text ~* 'mimecast' THEN 'mimecast'
+  WHEN di.mx_records::text ~* 'barracuda' THEN 'barracuda' WHEN di.mx_records::text ~* 'sophos' THEN 'sophos' END`;
+
+/** The meta MailBridge reads from `raw` (see ProvenanceMeta); search_log knows more than the cache. */
+const META_SQL = (fromSearch: boolean) => `jsonb_build_object(
+    'send_recommendation', ${fromSearch ? "sl.send_recommendation" : "NULL"},
+    'evidence_tier', ${fromSearch ? "sl.evidence" : "NULL"},
+    'expected_bounce', ${fromSearch ? EXPECTED_BOUNCE_SQL("sl.evidence") : "NULL"},
+    'mail_gateway', ${GATEWAY_SQL},
+    'mx_provider', di.provider,
+    'pattern', NULL,
+    'searched_name', ${fromSearch ? "CASE WHEN coalesce(trim(sl.first_name), '') <> '' OR coalesce(trim(sl.last_name), '') <> '' THEN jsonb_build_object('first', NULLIF(trim(sl.first_name), ''), 'last', NULLIF(trim(sl.last_name), '')) END" : "NULL"})`;
+
 export interface BackfillSource {
   origin: "backfill_search" | "backfill_cache";
   /** SELECT that yields the rows to insert, restricted to a [$1, $2) window of its date column. */
@@ -38,28 +59,32 @@ export interface BackfillSource {
 export const SOURCES: BackfillSource[] = [
   {
     origin: "backfill_search",
-    select: `SELECT DISTINCT ON (lower(result_email), method_used, result_status)
-        id, lower(result_email) AS email, 'clay_cache'::text AS finder,
-        CASE WHEN method_used IN ${VERIFIER_METHODS} THEN method_used END AS verifier,
-        ${VERDICT_SQL("result_status")} AS verdict, result_status AS raw_status,
-        NULL::float8 AS confidence, method_used AS method, 'backfill_search'::text AS origin, created_at AS checked_at
-      FROM search_log
-      WHERE result_email IS NOT NULL AND result_email LIKE '%@%'
-        AND (method_used IN ${VERIFIER_METHODS} OR method_used IN ${GUESS_METHODS})
-        AND created_at >= $1 AND created_at < $2
-      ORDER BY lower(result_email), method_used, result_status, created_at DESC`,
+    select: `SELECT DISTINCT ON (lower(sl.result_email), sl.method_used, sl.result_status)
+        sl.id, lower(sl.result_email) AS email, 'clay_cache'::text AS finder,
+        CASE WHEN sl.method_used IN ${VERIFIER_METHODS} THEN sl.method_used END AS verifier,
+        ${VERDICT_SQL("sl.result_status")} AS verdict, sl.result_status AS raw_status,
+        NULL::float8 AS confidence, sl.method_used AS method, 'backfill_search'::text AS origin, sl.created_at AS checked_at,
+        ${META_SQL(true)} AS meta
+      FROM search_log sl
+      LEFT JOIN domain_intel di ON di.domain = split_part(lower(sl.result_email), '@', 2)
+      WHERE sl.result_email IS NOT NULL AND sl.result_email LIKE '%@%'
+        AND (sl.method_used IN ${VERIFIER_METHODS} OR sl.method_used IN ${GUESS_METHODS})
+        AND sl.created_at >= $1 AND sl.created_at < $2
+      ORDER BY lower(sl.result_email), sl.method_used, sl.result_status, sl.created_at DESC`,
   },
   {
     origin: "backfill_cache",
-    select: `SELECT id, lower(email) AS email,
-        CASE WHEN method IN ${GUESS_METHODS} THEN 'clay_cache' END AS finder,
-        CASE WHEN method IN ${VERIFIER_METHODS} THEN method END AS verifier,
-        ${VERDICT_SQL("status")} AS verdict, status AS raw_status,
-        confidence, method, 'backfill_cache'::text AS origin, verified_at AS checked_at
-      FROM verification_cache
-      WHERE email LIKE '%@%'
-        AND (method IN ${VERIFIER_METHODS} OR method IN ${GUESS_METHODS})
-        AND verified_at >= $1 AND verified_at < $2`,
+    select: `SELECT vc.id, lower(vc.email) AS email,
+        CASE WHEN vc.method IN ${GUESS_METHODS} THEN 'clay_cache' END AS finder,
+        CASE WHEN vc.method IN ${VERIFIER_METHODS} THEN vc.method END AS verifier,
+        ${VERDICT_SQL("vc.status")} AS verdict, vc.status AS raw_status,
+        vc.confidence, vc.method, 'backfill_cache'::text AS origin, vc.verified_at AS checked_at,
+        ${META_SQL(false)} AS meta
+      FROM verification_cache vc
+      LEFT JOIN domain_intel di ON di.domain = split_part(lower(vc.email), '@', 2)
+      WHERE vc.email LIKE '%@%'
+        AND (vc.method IN ${VERIFIER_METHODS} OR vc.method IN ${GUESS_METHODS})
+        AND vc.verified_at >= $1 AND vc.verified_at < $2`,
   },
 ];
 
@@ -95,8 +120,8 @@ export async function buildHistory(opts: BuildOptions): Promise<{ candidates: nu
       if (opts.commit) {
         ins += Number(
           await prisma.$executeRawUnsafe(
-            `INSERT INTO email_provenance (id, email, finder, verifier, verdict, raw_status, confidence, method, origin, checked_at)
-             SELECT id, email, finder, verifier, verdict, raw_status, confidence, method, origin, checked_at FROM (${src.select}) s
+            `INSERT INTO email_provenance (id, email, finder, verifier, verdict, raw_status, confidence, method, origin, checked_at, meta)
+             SELECT id, email, finder, verifier, verdict, raw_status, confidence, method, origin, checked_at, meta FROM (${src.select}) s
              ON CONFLICT (id) DO NOTHING`,
             from,
             to

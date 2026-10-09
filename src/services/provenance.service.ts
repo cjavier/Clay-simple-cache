@@ -2,6 +2,7 @@ import prisma from "../db/prisma";
 import { findEmail as pipelineFind, verifySingleEmail as pipelineVerify } from "../email-finder/pipeline";
 import {
   deriveProvenance,
+  metaFromResult,
   isFreshFact,
   ProvenanceEntry,
   ProvenanceOrigin,
@@ -31,6 +32,7 @@ export async function recordProvenance(entries: ProvenanceEntry[]): Promise<void
         method: e.method,
         origin: e.origin,
         checked_at: new Date(e.checked_at),
+        meta: (e.meta ?? undefined) as any,
       })),
       skipDuplicates: true,
     });
@@ -71,7 +73,8 @@ async function profileSource(email: string): Promise<string | null> {
 export async function withProvenance(
   op: "find" | "verify",
   result: VerificationResult,
-  now: Date = new Date()
+  now: Date = new Date(),
+  request?: FindRequest | null
 ): Promise<VerificationResult> {
   const fresh = isFreshFact(result);
   let known: string | null = null;
@@ -96,6 +99,7 @@ export async function withProvenance(
       method: p.method,
       origin: op as ProvenanceOrigin,
       checked_at: p.checked_at,
+      meta: metaFromResult(result, request),
     };
     void recordProvenance([entry]);
   }
@@ -103,7 +107,7 @@ export async function withProvenance(
 }
 
 export async function findEmail(request: FindRequest): Promise<VerificationResult> {
-  return withProvenance("find", await pipelineFind(request));
+  return withProvenance("find", await pipelineFind(request), new Date(), request);
 }
 
 export async function verifySingleEmail(email: string, maxTier: number = 2): Promise<VerificationResult> {

@@ -359,9 +359,13 @@ model EmailProvenance {
   checked_at  DateTime  @db.Timestamptz(6)
   pushed_at   DateTime? @db.Timestamptz(6)
   push_error  String?
+  /// What the finder knew (send_recommendation, evidence_tier, expected_bounce,
+  /// mail_gateway, mx_provider, pattern, searched_name); sent as `raw` to MailBridge.
+  meta        Json?
   created_at  DateTime  @default(now()) @db.Timestamptz(6)
 
   @@index([email])
+  @@index([checked_at])
   @@index([pushed_at, created_at])
   @@index([finder])
   @@index([verifier, verdict])
