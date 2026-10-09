@@ -371,3 +371,68 @@ model EmailProvenance {
   @@index([verifier, verdict])
   @@map("email_provenance")
 }
+
+// ─── Email cascade (Blitz → Prospeo → Findymail) ───────────
+
+/// One person × one paid email finder: what it answered, or why it couldn't.
+/// "No encontrado" (`not_found`: the provider looked and has nothing) is not
+/// "no se pudo buscar" (`pending`: no credits, rate limit, error, budget).
+/// A `not_found` is not asked again for EMAIL_NOT_FOUND_RETRY_DAYS (90); a
+/// `pending` is retried when the reason clears. `closed` = the person was
+/// found in the cache (e.g. by Clay's "Get Email (External)") before anyone
+/// paid. See src/services/email-cascade/.
+model EmailAttempt {
+  id             String    @id @default(uuid()) @db.Uuid
+  /// li:<slug> or nd:<first>|<last>@<domain>
+  person_key     String
+  linkedin_url   String?
+  first_name     String?
+  last_name      String?
+  full_name      String?
+  company_domain String?
+  company_name   String?
+  /// Table job (POST /tables) the person belongs to; "" outside a list.
+  job_id         String    @default("")
+  mb_table_id    String?
+  /// The row's ref in that MailBridge table, so a later find upserts the same row.
+  row_ref        String?
+  /// blitzapi | prospeo | findymail
+  provider       String
+  /// found | not_found | pending | closed
+  status         String
+  /// pending: sin_creditos | rate_limit | error | presupuesto · closed: cache
+  reason         String?
+  email          String?
+  cost_usd       Float     @default(0)
+  tries          Int       @default(0)
+  last_error     String?
+  attempted_at   DateTime? @db.Timestamptz(6)
+  resolved_at    DateTime? @db.Timestamptz(6)
+  created_at     DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at     DateTime  @default(now()) @updatedAt @db.Timestamptz(6)
+
+  @@unique([person_key, provider, job_id])
+  @@index([status, provider])
+  @@index([job_id, status])
+  @@index([person_key])
+  @@map("email_attempts")
+}
+
+/// Circuit breaker per paid finder, in the database so it survives deploys.
+/// `exhausted_at` set = don't call it; the hourly check reads its (free)
+/// balance endpoint and clears it when there is money again.
+model EmailProviderState {
+  provider         String    @id
+  exhausted_at     DateTime? @db.Timestamptz(6)
+  /// sin_creditos | sin_acceso
+  exhausted_reason String?
+  exhausted_detail String?
+  last_balance     Float?
+  last_balance_at  DateTime? @db.Timestamptz(6)
+  /// YYYY-MM-DD (CDMX) of the last low-balance alert: one per day per provider.
+  low_alert_on     String?
+  reactivated_at   DateTime? @db.Timestamptz(6)
+  updated_at       DateTime  @default(now()) @updatedAt @db.Timestamptz(6)
+
+  @@map("email_provider_state")
+}

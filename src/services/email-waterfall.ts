@@ -1,14 +1,17 @@
 /**
- * The email waterfall every people table gets in MailBridge: Prospeo →
- * Findymail → Clay function "Get Email (External)" (its own cascade of
- * Icypeas, Kitt, LeadMagic… validated by Debounce). Rows that already carry
- * an email (Blitz) are skipped by the run condition.
+ * The email column every people table gets in MailBridge ("email_cascada"):
+ *   1. clay_cache — POST /emails/lookup on this API: a free cache read (by
+ *      LinkedIn, then name + domain). The paid finders (Blitz → Prospeo →
+ *      Findymail) now run HERE, during the build, with budget, breaker and
+ *      validation, so they are no longer steps of the column.
+ *   2. clay — Clay function "Get Email (External)" (its own cascade of
+ *      Icypeas, Kitt, LeadMagic… validated by Debounce), which also POSTs what
+ *      it finds back to /profiles (with linkedin_url), so the next lookup is free.
  *
- * It never runs by itself: MailBridge columns only run when someone asks
- * (and new columns are capped to a 3-row sandbox until verified), because
- * every step costs credits. The winning provider is stored as the cell's
- * provider — for the Clay step, the provider inside the function that found
- * it — so every email keeps its source.
+ * Rows that already carry an email are skipped by the run condition. It never
+ * runs by itself: MailBridge columns only run when someone asks (new columns
+ * are capped to a 3-row sandbox until verified). The winning provider is the
+ * cell's provider, so every email keeps its source.
  */
 
 export const EMAIL_WATERFALL_KEY = "email_cascada";
@@ -40,10 +43,10 @@ export function emailWaterfallColumn(routineId = clayEmailRoutineId()) {
         "Full Name": "{{full_name}}",
         "Company Domain": "{{domain}}",
         "Company Name": "{{company}}",
+        "LinkedIn URL": "{{linkedin_profile}}",
       },
       providers: [
-        { id: "prospeo", op: "find_email" },
-        { id: "findymail", op: "find_email" },
+        { id: "clay_cache", op: "lookup_email" },
         { id: "clay", op: "routine", routineId, timeoutMs: 30_000 },
       ],
     },

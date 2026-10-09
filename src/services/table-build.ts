@@ -41,20 +41,28 @@ export function currentExperience(person: any, companyLis?: Set<string>): any {
   return (cur.length ? cur : exps)[0] || {};
 }
 
-export type EmailStatus = "valido" | "no_encontrado" | "descartado" | "error" | "no_buscado";
+export type EmailStatus = "valido" | "no_encontrado" | "pendiente" | "descartado" | "error" | "no_buscado";
 
 export function emailOutcome(em: any): { status: EmailStatus; found: string; reason: string; others: string[] } {
   if (!em) return { status: "no_buscado", found: "", reason: "", others: [] };
   const found = typeof em.email === "string" ? em.email : "";
   const others = (em.all_emails || []).filter((x: unknown) => typeof x === "string" && x !== found);
   if (em.error) return { status: "error", found, reason: String(em.error), others };
+  // Not "not found": a provider couldn't look (no credits, rate limit, budget). Retried later.
+  if (!em.found && Array.isArray(em.pending) && em.pending.length) {
+    return { status: "pendiente", found: "", reason: em.pending.map((x: any) => `${x.provider}:${x.reason}`).join(";"), others };
+  }
   if (!em.found) return { status: "no_encontrado", found, reason: "", others };
   const junk = junkReason(found);
   return junk ? { status: "descartado", found, reason: junk, others } : { status: "valido", found, reason: "", others };
 }
 
-/** A people row (canonical fields). The email travels with its source, always. */
-export function personRow(person: any, exp: any, company: any, em: any, source = "blitzapi") {
+/**
+ * A people row (canonical fields). The email travels with its source, always,
+ * and with who verified it when the finder says so (`verification`:
+ * {provider|null, verdict}); without it the row's "valido" counts as `valid`.
+ */
+export function personRow(person: any, exp: any, company: any, em: any, source = "blitzapi", verification?: Record<string, unknown> | null) {
   const o = emailOutcome(em);
   const companyDomain = String(company?.domain || exp?.company_domain || "").toLowerCase();
   const emailDomain = o.found.includes("@") ? o.found.split("@")[1].toLowerCase() : "";
@@ -75,6 +83,7 @@ export function personRow(person: any, exp: any, company: any, em: any, source =
     connections: person?.connections_count,
     email: o.status === "valido" ? o.found : "",
     email_source: o.found ? source : "",
+    email_verification: o.status === "valido" && verification ? verification : undefined,
     email_status: o.status,
     email_found: o.found,
     // "no" = the address is on another domain (another job, the group, an agency): check by eye.

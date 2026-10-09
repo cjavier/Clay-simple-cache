@@ -4,6 +4,7 @@ import { MAX_ROWS_PER_REQUEST, tableJobService } from "../services/table-job.ser
 import { RowError, TABLE_KINDS, TableKind, toUpsertRow } from "../services/table-rows";
 import { blitzConfigured } from "../services/blitz.client";
 import { BuildConfig, buildSummary, MAX_COMPANIES, tableBuildService } from "../services/table-build.service";
+import { jobPendingSummary } from "../services/email-cascade/pending";
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 
@@ -15,15 +16,34 @@ export function parseBuild(b: unknown): BuildConfig | string {
   const max = b.max_companies === undefined ? MAX_COMPANIES : b.max_companies;
   if (!Number.isInteger(max) || (max as number) < 1 || (max as number) > MAX_COMPANIES) return `build.max_companies must be 1-${MAX_COMPANIES}`;
   if (b.find_emails !== undefined && typeof b.find_emails !== "boolean") return "build.find_emails must be boolean";
+  let budget: number | undefined;
+  if (b.email_budget_usd !== undefined) {
+    const n = Number(b.email_budget_usd);
+    if (b.email_budget_usd === null || !Number.isFinite(n) || n < 0 || n > 1000) return "build.email_budget_usd must be a number 0-1000 (USD)";
+    budget = n;
+  }
+  if (b.email_policy !== undefined && !["strict", "moderate", "permissive"].includes(b.email_policy as string)) return "build.email_policy must be strict | moderate | permissive";
   const monthly = Number(b.monthly) || 0;
   const months = Number(b.months) || 1;
   return {
+    ...(budget !== undefined ? { email_budget_usd: budget } : {}),
+    ...(b.email_policy !== undefined ? { email_policy: b.email_policy as BuildConfig["email_policy"] } : {}),
     company: b.company,
     people: (b.people as Record<string, unknown>) || {},
     max_companies: max as number,
     find_emails: b.find_emails !== false,
     needed: monthly ? monthly * months : null,
   };
+}
+
+/** The build's email block plus the pending people as they are now (retries change them). */
+async function withLivePending(jobId: string, summary: ReturnType<typeof buildSummary>) {
+  if (!summary?.emails) return summary;
+  try {
+    return { ...summary, emails: { ...summary.emails, pending_now: await jobPendingSummary(jobId), retry: `/tables/${jobId}/emails/retry` } };
+  } catch {
+    return summary;
+  }
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -188,7 +208,7 @@ export const tablesController = {
         // A build still producing rows outranks "synced": more are coming.
         ...(["queued", "running"].includes(job.build_status || "") ? { status: "building" } : {}),
         ...(job.build_status === "failed" ? { status: "failed" } : {}),
-        build: buildSummary(job.build_status, job.build_state as any, job.build as any, job.build_error),
+        build: await withLivePending(job.id, buildSummary(job.build_status, job.build_state as any, job.build as any, job.build_error)),
         created_at: job.created_at,
       });
     } catch (err) {

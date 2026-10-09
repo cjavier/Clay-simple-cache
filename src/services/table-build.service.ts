@@ -1,8 +1,12 @@
 import prisma from "../db/prisma";
-import { Blitz } from "./blitz.client";
 import { companyRow, currentExperience, normLi, personRow } from "./table-build";
 import { tableJobService } from "./table-job.service";
-import { toUpsertRow } from "./table-rows";
+import { rowRef, toUpsertRow } from "./table-rows";
+import { Budget, CascadeDeps, CascadeResult, findEmailCascade } from "./email-cascade/cascade";
+import { defaultBudgetUsd, defaultDeps } from "./email-cascade/pending";
+import { applyCascade } from "./email-cascade/rows";
+import { defaultPolicy, Policy } from "./email-cascade/verify";
+import { blitzClient } from "./email-cascade/providers";
 
 /**
  * The full list build, in the background: the whole TAM of a recipe, not a
@@ -17,6 +21,12 @@ import { toUpsertRow } from "./table-rows";
  * upserts each row by its LinkedIn.
  *
  * No cap of contacts per company (Javier, 2026-10-05).
+ *
+ * Emails go through the cascade (src/services/email-cascade): the cache of
+ * profiles first (free, keeps the original email_source), then Blitz →
+ * Prospeo → Findymail, capped by `email_budget_usd` per job. People a
+ * provider couldn't look up (no credits, rate limit, budget) are `pendiente`,
+ * not "no encontrado", and are retried later onto the same MailBridge row.
  */
 
 export interface BuildConfig {
@@ -27,6 +37,10 @@ export interface BuildConfig {
   find_emails: boolean;
   /** contacts/month × months, to judge coverage like the skill does. */
   needed?: number | null;
+  /** USD cap for paid email finders in this job (default EMAIL_BUDGET_DEFAULT_USD, 20). */
+  email_budget_usd?: number;
+  /** Acceptance policy for found addresses: strict | moderate | permissive (default EMAIL_ACCEPT_POLICY, moderate). */
+  email_policy?: Policy;
 }
 
 export interface BuildState {
@@ -39,6 +53,18 @@ export interface BuildState {
   emails_searched?: number;
   chunks?: number;
   records_used?: number;
+  /** Email cascade bookkeeping. */
+  email_spend_usd?: number;
+  emails_from_cache?: number;
+  emails_by_source?: Record<string, number>;
+  /** People without an email because a provider couldn't look (not "not found"). */
+  emails_pending?: number;
+  emails_pending_by_reason?: Record<string, number>;
+  /** Found but discarded by the policy (invalid, catch-all with negative evidence…). */
+  emails_discarded?: number;
+  /** Found, awaiting a conclusive validation (unknown/risky under moderate). */
+  emails_revalidate?: number;
+  budget_exhausted?: boolean;
   started_at?: string;
   finished_at?: string;
 }
@@ -50,15 +76,6 @@ const STALE_AFTER_MS = 10 * 60 * 1000;
 export const MAX_COMPANIES = 50_000;
 
 const running = new Set<string>();
-let shared: Promise<Blitz> | null = null;
-/** One client for every build, so all of them share the plan's rate limit. */
-function blitz(): Promise<Blitz> {
-  shared ??= new Blitz().init().catch((e) => {
-    shared = null;
-    throw e;
-  });
-  return shared;
-}
 
 async function mapPool<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
   const out: R[] = new Array(items.length);
@@ -101,7 +118,7 @@ export const tableBuildService = {
 };
 
 /** Exported for tests; production goes through tableBuildService.start(). */
-export async function run(jobId: string): Promise<void> {
+export async function run(jobId: string, deps?: CascadeDeps): Promise<void> {
   const job = await prisma.tableJob.findUnique({ where: { id: jobId } });
   if (!job || !job.build || !["queued", "running"].includes(job.build_status || "")) return;
   const cfg = job.build as unknown as BuildConfig;
@@ -109,7 +126,10 @@ export async function run(jobId: string): Promise<void> {
   const baseRecords = state.records_used || 0;
 
   try {
-    const bz = await blitz();
+    const bz = await blitzClient();
+    const cascade = deps ?? defaultDeps();
+    const peopleTable = ((job.tables as any)?.people?.table_id as string) || null;
+    const budget = new Budget(cfg.email_budget_usd ?? defaultBudgetUsd(), state.email_spend_usd || 0);
     const before = bz.recordsUsed;
     const used = () => baseRecords + (bz.recordsUsed - before);
 
@@ -155,21 +175,50 @@ export async function run(jobId: string): Promise<void> {
         people.push({ p, exp, companyLi: normLi(exp?.company_linkedin_url) });
       }
 
-      // 3. Emails (verified by Blitz; a miss costs nothing).
-      const emails = cfg.find_emails
-        ? await mapPool(people, EMAIL_CONCURRENCY, async ({ p }) => {
+      // 3. Emails: cache → Blitz → Prospeo → Findymail (misses cost nothing; finds count against the budget).
+      const results: Array<CascadeResult | { error: string } | null> = cfg.find_emails
+        ? await mapPool(people, EMAIL_CONCURRENCY, async ({ p, exp, companyLi }) => {
+            const c = companies.get(companyLi) || {};
             try {
-              return await bz.findEmail(p.linkedin_url);
+              return await findEmailCascade(
+                {
+                  linkedin_url: p.linkedin_url,
+                  first_name: p.first_name,
+                  last_name: p.last_name,
+                  full_name: p.full_name,
+                  company_domain: c.domain || exp?.company_domain,
+                  company_name: c.name || exp?.company_name,
+                },
+                cascade,
+                { budget, policy: cfg.email_policy, ctx: { job_id: jobId, mb_table_id: peopleTable, row_ref: p.linkedin_url ? rowRef("people", { linkedin_url: p.linkedin_url }) : null } }
+              );
             } catch (e: any) {
-              return { found: false, error: e?.message || String(e) };
+              return { error: e?.message || String(e) };
             }
           })
         : people.map(() => null);
+      for (const r of results) {
+        if (!r || "error" in r) continue;
+        if (r.found) {
+          state.emails_by_source = { ...state.emails_by_source, [r.email_source]: (state.emails_by_source?.[r.email_source] || 0) + 1 };
+          if (r.from_cache) state.emails_from_cache = (state.emails_from_cache || 0) + 1;
+        } else if (r.candidate) {
+          const k = r.candidate.qualification.decision === "revalidate" ? "emails_revalidate" : "emails_discarded";
+          state[k] = (state[k] || 0) + 1;
+        } else if (r.pending.length) {
+          state.emails_pending = (state.emails_pending || 0) + 1;
+          const reasons = { ...state.emails_pending_by_reason };
+          for (const reason of new Set(r.pending.map((x) => x.reason))) reasons[reason] = (reasons[reason] || 0) + 1;
+          state.emails_pending_by_reason = reasons;
+        }
+      }
 
       // 4. Rows → MailBridge (through the same queue as POST /tables/:id/rows).
       const perCompany = new Map<string, [number, number]>();
       const personRows = people.map(({ p, exp, companyLi }, i) => {
-        const row = personRow(p, exp, companies.get(companyLi) || {}, emails[i]);
+        const r = results[i];
+        let row = personRow(p, exp, companies.get(companyLi) || {}, r && "error" in r ? { found: false, error: r.error } : null);
+        if (r && !("error" in r)) row = applyCascade(row, r);
         const s = perCompany.get(companyLi) || [0, 0];
         s[0] += 1;
         if (row.email) s[1] += 1;
@@ -194,6 +243,8 @@ export async function run(jobId: string): Promise<void> {
       state.emails_searched = (state.emails_searched || 0) + (cfg.find_emails ? people.length : 0);
       state.emails_valid = (state.emails_valid || 0) + personRows.filter((r) => r.email).length;
       state.records_used = used();
+      state.email_spend_usd = budget.spentUsd;
+      state.budget_exhausted = budget.exhausted || undefined;
       await save(jobId, state);
 
       if (!cursor || page.length === 0) break;
@@ -235,6 +286,20 @@ export function buildSummary(status: string | null, state: BuildState, cfg: Buil
             : null,
         },
     records_used: state.records_used || 0,
+    emails: cfg?.find_emails === false
+      ? null
+      : {
+          budget_usd: cfg?.email_budget_usd ?? defaultBudgetUsd(),
+          spent_usd: state.email_spend_usd || 0,
+          budget_exhausted: Boolean(state.budget_exhausted),
+          from_cache: state.emails_from_cache || 0,
+          by_source: state.emails_by_source || {},
+          // People with no email because a provider couldn't look; they are retried, unlike "no encontrado".
+          pending: { persons: state.emails_pending || 0, by_reason: state.emails_pending_by_reason || {} },
+          policy: cfg?.email_policy ?? defaultPolicy(),
+          discarded: state.emails_discarded || 0,
+          awaiting_revalidation: state.emails_revalidate || 0,
+        },
     started_at: state.started_at ?? null,
     finished_at: state.finished_at ?? null,
   };

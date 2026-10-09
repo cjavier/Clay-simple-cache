@@ -6,6 +6,7 @@ import { findJobService } from './services/find-job.service';
 import { tableJobService } from './services/table-job.service';
 import { tableBuildService } from './services/table-build.service';
 import { startEvidenceSweeper } from './services/evidence-push.service';
+import { startEmailCascadeSchedule } from './services/email-cascade/schedule';
 
 const PORT = process.env.PORT || 3000;
 
@@ -33,4 +34,7 @@ app.listen(PORT, () => {
         .resume()
         .then((n) => n > 0 && console.log(`[table-build] reanudadas ${n} construcciones`))
         .catch((e) => console.error('[table-build] no se pudieron reanudar:', e));
+    // Email cascade: hourly balance check of Prospeo/Findymail — reopens a
+    // provider out of credits once it's topped up and retries its pending people.
+    startEmailCascadeSchedule();
 });

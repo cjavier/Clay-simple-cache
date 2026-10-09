@@ -33,6 +33,9 @@ import { findLinkedInForDomain } from "../services/linkedin-finder.service";
 import { LlmApiError, LlmConfigError } from "../services/llm.service";
 import { runExploreAgent } from "../services/explore-agent.service";
 import { generateCopy } from "../services/copy.service";
+import { queueRetry } from "../services/email-cascade/pending";
+import { parseRetry } from "../controllers/emails.controller";
+import { tableJobService } from "../services/table-job.service";
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -1143,6 +1146,47 @@ export function buildMcpServer(): McpServer {
         patterns_learned: patternsLearned,
         catch_all_domains: catchAllCount,
       });
+    })
+  );
+
+  // -- retry_pending_emails ---------------------------------------------------
+  server.registerTool(
+    "retry_pending_emails",
+    {
+      title: "Retry Pending Emails",
+      description:
+        "Retry the people a list build left WITHOUT an email because a paid finder couldn't look them up " +
+        "(Prospeo/Findymail/Blitz out of credits, rate limited, errored, or the job's email budget ran out) — " +
+        "not the ones a provider answered \"not found\" (those aren't re-bought for 90 days). Runs in the " +
+        "background: the cache is read first for free (if Clay's function already found them, nothing is paid), " +
+        "then only the providers each person is pending for, up to budget_usd. Found emails are written back to " +
+        "their MailBridge table, same row. Returns how many people will be retried.",
+      inputSchema: {
+        table_job_id: z.string().optional().describe("Job id from POST /tables (create_table). Omit to retry across every list."),
+        provider: z.enum(["blitzapi", "prospeo", "findymail", "verify"]).optional().describe("Only people pending for this provider (\"verify\" = address known, awaiting a conclusive validation)."),
+        reason: z.enum(["sin_creditos", "rate_limit", "error", "presupuesto", "revalidar"]).optional().describe("Only people pending for this reason."),
+        policy: z.enum(["strict", "moderate", "permissive"]).optional().describe("Acceptance policy for found addresses (default moderate: catch-all passes unless there's negative evidence)."),
+        since: z.string().optional().describe("ISO date: only pending rows touched since then."),
+        budget_usd: z.number().optional().describe("Spend cap for this retry run in USD (default 20)."),
+      },
+      annotations: {
+        title: "Retry Pending Emails",
+        readOnlyHint: false,
+        destructiveHint: false,
+        // Spends real money on Prospeo/Findymail.
+        openWorldHint: true,
+      },
+    },
+    safe(async (args: any) => {
+      const parsed = parseRetry(args);
+      if (typeof parsed === "string") return fail(parsed);
+      if (args.table_job_id) {
+        const job = await tableJobService.get(String(args.table_job_id)).catch(() => null);
+        if (!job) return fail(`table job ${args.table_job_id} not found`);
+        parsed.filter.job_id = job.id;
+      }
+      const q = await queueRetry(parsed.filter, { trigger: "manual", budgetUsd: parsed.budgetUsd, policy: parsed.policy, label: "reintento manual (MCP)" });
+      return ok({ retrying: q.persons, pending_rows: q.pending_rows, budget_usd: parsed.budgetUsd, status: "processing in background" });
     })
   );
 

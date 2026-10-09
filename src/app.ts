@@ -56,7 +56,19 @@ const costlyLimiter = rateLimit({
 
 const COSTLY_PATHS = ['/find', '/verify', '/detect-tech', '/copy', '/explore', '/find-linkedin'];
 
-app.use(globalLimiter);
+// POST /emails/lookup is a free cache read that MailBridge calls once per row
+// of a table's email column: it gets its own, larger bucket instead of eating
+// the global one.
+const LOOKUP_RATE_LIMIT_PER_MIN = Number(process.env.LOOKUP_RATE_LIMIT_PER_MIN) || 1200;
+const lookupLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    limit: LOOKUP_RATE_LIMIT_PER_MIN,
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+
+app.use('/emails/lookup', lookupLimiter);
+app.use((req, res, next) => (req.path === '/emails/lookup' ? next() : globalLimiter(req, res, next)));
 app.use(COSTLY_PATHS, costlyLimiter);
 
 app.use(router);

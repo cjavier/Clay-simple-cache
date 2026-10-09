@@ -60,7 +60,7 @@ curl -H "Authorization: Bearer your_secret_key" {{BASE_URL}}/profiles?email=test
 - [11. AI — Copy & Explore](#ai)
   - [\`POST /copy\`](#copy-post) · [\`POST /explore\`](#explore-post)
 - [11b. Lists for MailBridge](#tables)
-  - [\`POST /tables\`](#tables-post) · [\`POST /tables/:id/rows\`](#tables-rows-post) · [\`GET /tables/:id\`](#tables-get) · [\`POST /tables/:id/retry\`](#tables-retry-post)
+  - [\`POST /tables\`](#tables-post) · [\`POST /tables/:id/rows\`](#tables-rows-post) · [\`GET /tables/:id\`](#tables-get) · [\`POST /tables/:id/retry\`](#tables-retry-post) · [Email cascade](#email-cascade) · [\`POST /emails/retry\`](#emails-retry-post) · [\`POST /emails/lookup\`](#emails-lookup-post)
 - [12. MCP Server](#mcp-server)
 - [13. Errors & Limits](#errors-and-limits)
 - [14. For AI Agents (llms.txt style)](#for-ai-agents)
@@ -98,6 +98,8 @@ curl -H "Authorization: Bearer your_secret_key" {{BASE_URL}}/profiles?email=test
 | \`POST\` | \`/tables/:id/rows\` | Queue rows for those tables; MailBridge receives them in the background. | [Lists](#tables-rows-post) |
 | \`GET\` | \`/tables/:id\` | Sync status per table (received, sent, pending, failed). | [Lists](#tables-get) |
 | \`POST\` | \`/tables/:id/retry\` | Requeue the batches MailBridge refused. | [Lists](#tables-retry-post) |
+| \`POST\` | \`/tables/:id/emails/retry\` · \`/emails/retry\` | Retry people the email cascade left pending (no credits, rate limit, budget, revalidation). | [Lists](#emails-retry-post) |
+| \`POST\` | \`/emails/lookup\` | Free cache read: email by LinkedIn or name + domain (MailBridge \`clay_cache\`). | [Lists](#emails-lookup-post) |
 | \`POST\` | \`/mcp\` | MCP (Model Context Protocol) JSON-RPC endpoint — Streamable HTTP, stateless. | [MCP Server](#mcp-server) |
 | \`GET\`/\`DELETE\` | \`/mcp\` | \`405\` — this MCP server is stateless (no sessions to fetch/delete). | [MCP Server](#mcp-server) |
 | \`GET\` | \`/llms.txt\` | Machine-readable service summary for LLM agents (no auth). | [MCP Server](#mcp-server) |
@@ -863,7 +865,7 @@ Tables are named \`<campaign> — Empresas <niche>\` and \`<campaign> — Person
 \`\`\`
 **Errors**: \`400\` missing fields / unknown client; \`502\` MailBridge failed; \`503\` not configured.
 
-**Build in the background from Blitz (optional \`build\`)**: instead of sending rows yourself, pass Blitz filters (already in Blitz's shape) and the API downloads the list on its own: companies in chunks of 50 → every person matching \`people\` at those companies (no per-company cap) → their email from Blitz (tagged \`blitzapi\`) → rows into the two tables. Progress is saved after every chunk; a restart resumes from the last finished one.
+**Build in the background from Blitz (optional \`build\`)**: instead of sending rows yourself, pass Blitz filters (already in Blitz's shape) and the API downloads the list on its own: companies in chunks of 50 → every person matching \`people\` at those companies (no per-company cap) → their email through the **email cascade** (cache → Blitz → Prospeo → Findymail, every address validated; see [Email cascade](#email-cascade)) → rows into the two tables. Progress is saved after every chunk; a restart resumes from the last finished one.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
@@ -872,8 +874,10 @@ Tables are named \`<campaign> — Empresas <niche>\` and \`<campaign> — Person
 | \`build.max_companies\` | int | No | Default: the whole TAM (Blitz caps a search at 50,000). |
 | \`build.find_emails\` | bool | No | Default \`true\`. |
 | \`build.monthly\`, \`build.months\` | int | No | Contracted volume, for the coverage verdict. |
+| \`build.email_budget_usd\` | number | No | USD cap for paid finders in this job. Default 20 (\`EMAIL_BUDGET_DEFAULT_USD\`). |
+| \`build.email_policy\` | string | No | \`strict\` \| \`moderate\` \| \`permissive\`. Default \`moderate\` (\`EMAIL_ACCEPT_POLICY\`). |
 
-Requires \`BLITZAPI_KEY\` on the server. The response's \`status\` is \`building\`; \`GET /tables/:id\` adds a \`build\` block: \`status\` (\`queued\`/\`running\`/\`done\`/\`failed\`), \`tam\` (Blitz counts), \`progress\`, \`coverage\` (\`email_rate\`, \`reachable_estimate\`, \`verdict\`), \`records_used\`.
+Requires \`BLITZAPI_KEY\` on the server. The response's \`status\` is \`building\`; \`GET /tables/:id\` adds a \`build\` block: \`status\` (\`queued\`/\`running\`/\`done\`/\`failed\`), \`tam\` (Blitz counts), \`progress\`, \`coverage\` (\`email_rate\`, \`reachable_estimate\`, \`verdict\`), \`records_used\`, and \`emails\` (\`budget_usd\`, \`spent_usd\`, \`budget_exhausted\`, \`policy\`, \`from_cache\`, \`by_source\`, \`pending\`, \`pending_now\` (live), \`discarded\`, \`awaiting_revalidation\`, \`retry\`).
 
 <a id="tables-rows-post"></a>
 ### \`POST /tables/:id/rows\` — Send rows
@@ -904,6 +908,43 @@ Retries: MailBridge down, \`429\` or \`5xx\` → retried with backoff (5 s … 2
 ### \`POST /tables/:id/retry\` — Requeue failed batches
 
 \`{ "requeued_batches": 2 }\`
+
+---
+
+<a id="email-cascade"></a>
+### Email cascade — how a build finds emails
+
+1. **Cache first**: profiles by LinkedIn slug, then name + domain. A hit keeps its original \`email_source\`; nobody pays.
+2. **Finders**: Blitz → Prospeo → Findymail, stopping at the first address that passes the policy.
+3. **Validation**: Findymail verify (resolves catch-all on Google) → DeBounce → EmailListVerify as fallbacks (circuit breaker per validator). A recent conclusive verdict (≤ 30 days) is reused.
+4. **Policy** (\`EMAIL_ACCEPT_POLICY\` / \`build.email_policy\`, default \`moderate\`): \`invalid\` and known bounces are always discarded; \`valid\` passes; \`catch_all\` passes under \`moderate\` unless there is negative evidence (domain with only bounces, this pattern bounced, Mimecast); \`unknown\`/\`risky\` wait for revalidation. \`strict\` needs a confirmed pattern for catch-all; \`permissive\` takes everything but \`invalid\`/bounced. Discarded or waiting addresses go to \`Email Found\` with \`Discard Reason\`, never to \`Email\`.
+
+"Not found" (the provider looked) is not "couldn't look" (\`pending\`: \`sin_creditos\`, \`rate_limit\`, \`error\`, \`presupuesto\`, \`revalidar\`). Pending people are retried hourly when a provider's breaker closes (free balance check), or by hand. Columns that reach MailBridge: \`Email\`, \`Email Source\`, \`Email Status\`, \`Email Found\`, \`Discard Reason\`, \`Email Verifier\`, \`Email Verdict\`, \`Email Checked At\`, \`Email Confidence\`, \`Email Validator Response\`, \`MX Provider\`, \`Mail Gateway\`, \`Domain Catch-All\`, \`Email Evidence\`, \`Expected Bounce\`, \`Send Recommendation\`, \`Email Policy\`.
+
+<a id="emails-retry-post"></a>
+### \`POST /tables/:id/emails/retry\` · \`POST /emails/retry\` — Retry pending people
+
+Body (all optional): \`since\` (ISO date), \`provider\` (\`blitzapi\` | \`prospeo\` | \`findymail\` | \`verify\`), \`reason\` (\`sin_creditos\` | \`rate_limit\` | \`error\` | \`presupuesto\` | \`revalidar\`), \`budget_usd\` (default 20), \`policy\`, \`limit\`.
+
+**Response — \`202\`**: \`{ "retrying": 37, "pending_rows": 41, "budget_usd": 20, "filter": {...} }\`. Processing runs in the background: cache first (free), then only the providers each person is pending for. Found addresses go back to the same MailBridge row (same \`ref\`). MCP: \`retry_pending_emails\`.
+
+<a id="emails-lookup-post"></a>
+### \`POST /emails/lookup\` — Free cache read (MailBridge \`clay_cache\` provider)
+
+Contract (MailBridge's \`clay_cache\` provider depends on it):
+
+\`\`\`json
+// request — linkedin_url, or a name (first_name + last_name, or full_name) with company_domain
+{ "linkedin_url": "https://www.linkedin.com/in/…", "first_name": "Javier", "last_name": "Garcia", "full_name": null, "company_domain": "improvitz.com" }
+// response 200
+{ "found": true, "email": "javier@improvitz.com", "email_source": "icypeas",
+  "email_verification": { "provider": "debounce", "verdict": "catch_all", "checked_at": "…", "confidence": null },
+  "email_found_via": "clay_get_email_external" }
+// nothing cached
+{ "found": false, "email": null, "email_source": null, "email_verification": null, "email_found_via": null }
+\`\`\`
+
+Never calls a provider, never costs. \`400\` without LinkedIn or name + domain. Own rate limit bucket (\`LOOKUP_RATE_LIMIT_PER_MIN\`, default 1200/min).
 
 ---
 
