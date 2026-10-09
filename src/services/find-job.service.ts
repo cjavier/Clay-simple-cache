@@ -1,6 +1,7 @@
 import prisma from "../db/prisma";
 import { findEmail } from "../email-finder";
 import { FindRequest, VerificationResult } from "../email-finder/types";
+import { provenanceFields } from "../email-finder/provenance";
 
 /**
  * Batch `/find` as a job the caller polls, instead of a request it waits on.
@@ -95,7 +96,7 @@ async function run(jobId: string): Promise<void> {
         slice.map(async (req) => {
           try {
             const result: VerificationResult = await findEmail(req);
-            return { ref: req.ref ?? null, ...result };
+            return { ref: req.ref ?? null, ...result, ...provenanceFields(result) };
           } catch (err: any) {
             return {
               ref: req.ref ?? null,

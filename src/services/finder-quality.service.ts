@@ -359,3 +359,86 @@ export async function scoreAgainstOutcomes(windowDays: number = 30): Promise<Out
     };
   });
 }
+
+export interface ProvenanceOutcomeRow {
+  /** finder / verifier / verdict / method, depending on the breakdown; null when the dimension is empty. */
+  finder?: string | null;
+  verifier?: string | null;
+  verdict?: string | null;
+  method?: string | null;
+  /** Distinct addresses with this provenance recorded in the window. */
+  emails: number;
+  /** Of those, the ones with a first visible send (a mailbox whose bounces MailBridge can see). */
+  sent: number;
+  /** Of `sent`, the ones that hard-bounced. */
+  bounced: number;
+  bounce_rate: number | null;
+}
+
+export interface ProvenanceOutcomes {
+  window_days: number;
+  by_finder: ProvenanceOutcomeRow[];
+  by_verifier_verdict: ProvenanceOutcomeRow[];
+  by_method: ProvenanceOutcomeRow[];
+}
+
+/**
+ * Real bounce rate per finder, per verifier + verdict and per decision path.
+ *
+ * Denominator: addresses with `first_visible_send_at` — mailed from a mailbox
+ * whose bounces MailBridge can see (Maildoso filters theirs, so a Maildoso send
+ * without a bounce proves nothing). Numerator: the ones that hard-bounced.
+ * Provenance is history, so an address with two finders counts once under each.
+ */
+export async function scoreProvenanceAgainstOutcomes(windowDays: number = 30): Promise<ProvenanceOutcomes> {
+  const since = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000);
+
+  type Raw = { a: string | null; b: string | null; emails: bigint; sent: bigint; bounced: bigint };
+  const run = async (dim: "finder" | "verifier_verdict" | "method"): Promise<Raw[]> => {
+    // The dimension columns are picked in SQL text from a closed set, never from input.
+    const cols =
+      dim === "finder"
+        ? { a: "p.finder", b: "NULL::text" }
+        : dim === "verifier_verdict"
+          ? { a: "p.verifier", b: "p.verdict" }
+          : { a: "p.method", b: "NULL::text" };
+    const where = dim === "finder" ? "p.finder IS NOT NULL" : dim === "verifier_verdict" ? "p.verifier IS NOT NULL" : "p.method IS NOT NULL";
+    return prisma.$queryRawUnsafe<Raw[]>(
+      `WITH p AS (
+         SELECT DISTINCT email, finder, verifier, verdict, method
+         FROM email_provenance WHERE checked_at >= $1
+       ),
+       o AS (
+         SELECT email,
+                bool_or(bounced_at IS NOT NULL AND COALESCE(bounce_type, 'hard') <> 'soft') AS bounced,
+                min(first_visible_send_at) AS first_send
+         FROM email_outcomes
+         WHERE email IN (SELECT email FROM p)
+         GROUP BY email
+       )
+       SELECT ${cols.a} AS a, ${cols.b} AS b,
+              count(DISTINCT p.email) AS emails,
+              count(DISTINCT p.email) FILTER (WHERE o.first_send IS NOT NULL) AS sent,
+              count(DISTINCT p.email) FILTER (WHERE o.first_send IS NOT NULL AND o.bounced) AS bounced
+       FROM p LEFT JOIN o ON o.email = p.email
+       WHERE ${where}
+       GROUP BY 1, 2
+       ORDER BY sent DESC, emails DESC
+       LIMIT 50`,
+      since
+    );
+  };
+
+  const shape = (r: Raw) => {
+    const sent = Number(r.sent);
+    const bounced = Number(r.bounced);
+    return { emails: Number(r.emails), sent, bounced, bounce_rate: sent > 0 ? bounced / sent : null };
+  };
+  const [f, v, m] = await Promise.all([run("finder"), run("verifier_verdict"), run("method")]);
+  return {
+    window_days: windowDays,
+    by_finder: f.map((r) => ({ finder: r.a, ...shape(r) })),
+    by_verifier_verdict: v.map((r) => ({ verifier: r.a, verdict: r.b, ...shape(r) })),
+    by_method: m.map((r) => ({ method: r.a, ...shape(r) })),
+  };
+}

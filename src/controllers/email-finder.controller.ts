@@ -4,7 +4,8 @@ import prisma from "../db/prisma";
 import { dncService } from "../services/dnc.service";
 import { resolveClientOr404 } from "./client-resolver";
 import { findJobService, BatchItem } from "../services/find-job.service";
-import { scoreRecentAnswers, scoreAgainstOutcomes } from "../services/finder-quality.service";
+import { scoreRecentAnswers, scoreAgainstOutcomes, scoreProvenanceAgainstOutcomes } from "../services/finder-quality.service";
+import { provenanceFields } from "../email-finder/provenance";
 import { debounceQueueDepth } from "../email-finder/providers/debounce";
 
 /** Muted domains, or null when the table isn't there yet. */
@@ -103,6 +104,7 @@ export const emailFinderController = {
         evidence: result.evidence,
         expected_bounce: result.expected_bounce,
         mail_gateway: result.mail_gateway ?? null,
+        ...provenanceFields(result),
         cost_usd: result.cost_usd,
         duration_ms: result.duration_ms,
         ...(dncRequested ? { do_not_contact: false } : {}),
@@ -150,6 +152,7 @@ export const emailFinderController = {
         send_recommendation: result.send_recommendation,
         evidence: result.evidence,
         mail_gateway: result.mail_gateway ?? null,
+        ...provenanceFields(result),
         cost_usd: result.cost_usd,
         duration_ms: result.duration_ms,
         ...(dncRequested ? { do_not_contact: false } : {}),
@@ -294,6 +297,7 @@ export const emailFinderController = {
         mutedDomains,
         quality,
         outcomes,
+        outcomesByProvenance,
       ] = await Promise.all([
         prisma.searchLog.count(),
         prisma.searchLog.count({ where: { result_status: "valid" } }),
@@ -312,6 +316,7 @@ export const emailFinderController = {
         countMutedDomains(),
         scoreRecentAnswers(windowDays).catch(() => null),
         scoreAgainstOutcomes(30).catch(() => null),
+        scoreProvenanceAgainstOutcomes(30).catch(() => null),
       ]);
 
       const methods: Record<string, number> = {};
@@ -339,6 +344,8 @@ export const emailFinderController = {
         // Ground truth: bounce rate of our answers once mailed (MailBridge),
         // last 30 days, by verdict and by the recommendation we gave.
         outcomes,
+        // The same ground truth cut by who found / who verified the address (email_provenance x email_outcomes).
+        outcomes_by_provenance: outcomesByProvenance,
       });
     } catch (error: any) {
       console.error("Email Finder Stats Error:", error);
