@@ -15,7 +15,8 @@ import { ingestOutcomes, OutcomeRowInput } from "../email-finder/outcomes";
  */
 
 export const OUTCOMES_EVENT = "email_outcomes";
-const MAX_SKEW_MS = 60 * 60 * 1000;
+// MailBridge stamps a fresh timestamp on every delivery attempt, so a retry is not penalised.
+export const MAX_SKEW_MS = 5 * 60 * 1000;
 
 export interface MailbridgeOutcomeRow {
   contact_id: string;
