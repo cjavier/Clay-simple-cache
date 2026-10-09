@@ -14,7 +14,11 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
 
 app.use(cors(allowedOrigins.length > 0 ? { origin: allowedOrigins } : undefined));
 
-app.use(express.json({ limit: '1mb' }));
+// Lists arrive as up to 5,000 rows per POST /tables/:id/rows; everything else
+// keeps the 1 MB cap.
+const jsonSmall = express.json({ limit: '1mb' });
+const jsonLarge = express.json({ limit: '15mb' });
+app.use((req, res, next) => (/^\/tables\/[^/]+\/rows$/.test(req.path) ? jsonLarge : jsonSmall)(req, res, next));
 
 // Rate limiting: a generous global limit for all requests, plus a stricter
 // limit on the costly/external-API-backed endpoints.

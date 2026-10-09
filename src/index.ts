@@ -3,6 +3,7 @@ dotenv.config();
 import app from './app';
 import { startCreditCheckSchedule } from './jobs/credit-check-schedule';
 import { findJobService } from './services/find-job.service';
+import { tableJobService } from './services/table-job.service';
 
 const PORT = process.env.PORT || 3000;
 
@@ -19,4 +20,8 @@ app.listen(PORT, () => {
         .reclaimStaleJobs()
         .then((n) => n > 0 && console.log(`[find-jobs] reanudados ${n} trabajos interrumpidos`))
         .catch((e) => console.error('[find-jobs] no se pudieron reanudar:', e));
+
+    // Rows waiting to reach MailBridge (POST /tables/:id/rows): resume what a
+    // deploy interrupted and keep sweeping for retries whose backoff is over.
+    void tableJobService.start().catch((e) => console.error('[table-jobs] no se pudo arrancar:', e));
 });

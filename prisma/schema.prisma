@@ -253,3 +253,51 @@ model FindJob {
   @@index([status])
   @@map("find_jobs")
 }
+
+/// A list being built for a MailBridge client: one MailBridge table per kind
+/// (companies, people). The tables are created synchronously by POST /tables;
+/// the rows arrive later through POST /tables/:id/rows and are forwarded in the
+/// background as `TableJobBatch`es, so the caller never waits on MailBridge.
+model TableJob {
+  id             String          @id @db.Uuid
+  mb_client_id   String          @db.Uuid
+  mb_client_name String?
+  campaign       String
+  niche          String
+  /// Whatever the caller used to build the list (recipe, provider filters).
+  filters        Json            @default("{}")
+  /// Where the rows come from, e.g. "blitzapi".
+  source         String?
+  /// { companies: { table_id, name }, people: { table_id, name } }
+  tables         Json            @default("{}")
+  created_at     DateTime        @default(now()) @db.Timestamptz(6)
+  updated_at     DateTime        @updatedAt @db.Timestamptz(6)
+  batches        TableJobBatch[]
+
+  @@index([mb_client_id])
+  @@map("table_jobs")
+}
+
+/// Rows waiting to reach MailBridge. `sending` is transient: a batch stuck in
+/// it past STALE_AFTER_MS died with its process and is put back to `pending`.
+model TableJobBatch {
+  id              String   @id @default(uuid()) @db.Uuid
+  job_id          String   @db.Uuid
+  job             TableJob @relation(fields: [job_id], references: [id], onDelete: Cascade)
+  kind            String // companies | people
+  /// Already mapped for MailBridge: [{ ref, data, sources }]
+  rows            Json
+  row_count       Int
+  status          String   @default("pending") // pending | sending | sent | failed
+  attempts        Int      @default(0)
+  next_attempt_at DateTime @default(now()) @db.Timestamptz(6)
+  inserted        Int      @default(0)
+  updated         Int      @default(0)
+  error           String?
+  created_at      DateTime @default(now()) @db.Timestamptz(6)
+  updated_at      DateTime @updatedAt @db.Timestamptz(6)
+
+  @@index([status, next_attempt_at])
+  @@index([job_id])
+  @@map("table_job_batches")
+}

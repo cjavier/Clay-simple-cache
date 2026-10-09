@@ -168,6 +168,12 @@ See the full, always-current API reference at `GET /docs/api` (e.g. `http://loca
   - `POST /copy`: Generate outbound copy from a prompt. Returns `503` if the active provider's API key is unset, `502` on upstream failure. Optional `response_schema` returns `response` as parsed JSON matching that shape.
   - `POST /explore`: Run a tool-using research agent (`serp_search` + `fetch_page`, up to `max_steps` tool calls, default 8, hard cap 15). Returns the final message plus a step-by-step trace. Optional `response_schema` returns `message` as parsed JSON matching that shape.
 
+- **Lists for MailBridge** (async)
+  - `POST /tables`: Create a list's tables (companies + people) in MailBridge for a client; returns a job id and the MailBridge table ids.
+  - `POST /tables/:id/rows`: Queue up to 5,000 rows; they reach MailBridge in the background, upserted by a stable `ref`. **A people row with an email must carry `email_source`** (e.g. `blitzapi`), stored as the "Email Source" column and as the Email cell's provider.
+  - `GET /tables/:id`: Sync status per table (`?live=1` also reads MailBridge's row count). `POST /tables/:id/retry` requeues refused batches.
+  - Needs `MAILBRIDGE_API_KEY` (+ optional `MAILBRIDGE_API_URL`).
+
 - **Misc**
   - `GET /health`: Liveness check (no auth), returns `OK`.
   - `GET /docs/api`: This documentation (no auth).
