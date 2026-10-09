@@ -2,6 +2,29 @@ import { Request, Response } from "express";
 import { mailbridge, mailbridgeConfigured, MailBridgeError } from "../services/mailbridge.client";
 import { MAX_ROWS_PER_REQUEST, tableJobService } from "../services/table-job.service";
 import { RowError, TABLE_KINDS, TableKind, toUpsertRow } from "../services/table-rows";
+import { blitzConfigured } from "../services/blitz.client";
+import { BuildConfig, buildSummary, MAX_COMPANIES, tableBuildService } from "../services/table-build.service";
+
+const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+
+/** `build` of POST /tables: Blitz filters already translated by the skill. Returns an error string or the config. */
+export function parseBuild(b: unknown): BuildConfig | string {
+  if (!isObj(b)) return "build must be an object";
+  if (!isObj(b.company) || Object.keys(b.company).length === 0) return "build.company (Blitz company filter) is required";
+  if (b.people !== undefined && !isObj(b.people)) return "build.people must be an object";
+  const max = b.max_companies === undefined ? MAX_COMPANIES : b.max_companies;
+  if (!Number.isInteger(max) || (max as number) < 1 || (max as number) > MAX_COMPANIES) return `build.max_companies must be 1-${MAX_COMPANIES}`;
+  if (b.find_emails !== undefined && typeof b.find_emails !== "boolean") return "build.find_emails must be boolean";
+  const monthly = Number(b.monthly) || 0;
+  const months = Number(b.months) || 1;
+  return {
+    company: b.company,
+    people: (b.people as Record<string, unknown>) || {},
+    max_companies: max as number,
+    find_emails: b.find_emails !== false,
+    needed: monthly ? monthly * months : null,
+  };
+}
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -57,6 +80,19 @@ export const tablesController = {
       res.status(400).json({ error: "filters must be an object" });
       return;
     }
+    let build: BuildConfig | null = null;
+    if (b.build !== undefined) {
+      const parsed = parseBuild(b.build);
+      if (typeof parsed === "string") {
+        res.status(400).json({ error: parsed });
+        return;
+      }
+      if (!blitzConfigured()) {
+        res.status(503).json({ error: "BLITZAPI_KEY is not configured on this server" });
+        return;
+      }
+      build = parsed;
+    }
     try {
       const job = await tableJobService.create({
         mailbridge_client: client,
@@ -64,13 +100,15 @@ export const tablesController = {
         niche,
         kinds,
         filters: b.filters,
-        source: text(b.source, 40),
+        source: text(b.source, 40) ?? (build ? "blitzapi" : null),
+        build,
       });
+      if (build) tableBuildService.start(job.id);
       res.status(201).json({
         id: job.id,
         mailbridge_client: job.client,
         tables: job.tables,
-        status: "ready",
+        status: build ? "building" : "ready",
         rows: `/tables/${job.id}/rows`,
       });
     } catch (err) {
@@ -138,6 +176,10 @@ export const tablesController = {
         filters: job.filters,
         tables,
         ...sync,
+        // A build still producing rows outranks "synced": more are coming.
+        ...(["queued", "running"].includes(job.build_status || "") ? { status: "building" } : {}),
+        ...(job.build_status === "failed" ? { status: "failed" } : {}),
+        build: buildSummary(job.build_status, job.build_state as any, job.build as any, job.build_error),
         created_at: job.created_at,
       });
     } catch (err) {

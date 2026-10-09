@@ -2,6 +2,7 @@ import crypto from "crypto";
 import prisma from "../db/prisma";
 import { mailbridge, MailBridgeError, UpsertRow } from "./mailbridge.client";
 import { TableKind, tableNames } from "./table-rows";
+import type { BuildConfig } from "./table-build.service";
 
 /**
  * Lists built for MailBridge clients.
@@ -36,6 +37,8 @@ export interface CreateInput {
   kinds: TableKind[];
   filters?: Record<string, unknown>;
   source?: string | null;
+  /** Build the list in the background from Blitz (see table-build.service.ts). */
+  build?: BuildConfig | null;
 }
 
 let draining = false;
@@ -71,6 +74,7 @@ export const tableJobService = {
         filters: (input.filters ?? {}) as object,
         source: input.source ?? null,
         tables,
+        ...(input.build ? { build: input.build as unknown as object, build_status: "queued" } : {}),
       },
     });
     return { id, client, tables };

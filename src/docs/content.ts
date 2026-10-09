@@ -831,6 +831,18 @@ Tables are named \`<campaign> — Empresas <niche>\` and \`<campaign> — Person
 \`\`\`
 **Errors**: \`400\` missing fields / unknown client; \`502\` MailBridge failed; \`503\` not configured.
 
+**Build in the background from Blitz (optional \`build\`)**: instead of sending rows yourself, pass Blitz filters (already in Blitz's shape) and the API downloads the list on its own: companies in chunks of 50 → every person matching \`people\` at those companies (no per-company cap) → their email from Blitz (tagged \`blitzapi\`) → rows into the two tables. Progress is saved after every chunk; a restart resumes from the last finished one.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| \`build.company\` | object | **Yes** | Blitz company filter (\`/v2/search/companies\`). |
+| \`build.people\` | object | No | Blitz people filter (job level, function…). |
+| \`build.max_companies\` | int | No | Default: the whole TAM (Blitz caps a search at 50,000). |
+| \`build.find_emails\` | bool | No | Default \`true\`. |
+| \`build.monthly\`, \`build.months\` | int | No | Contracted volume, for the coverage verdict. |
+
+Requires \`BLITZAPI_KEY\` on the server. The response's \`status\` is \`building\`; \`GET /tables/:id\` adds a \`build\` block: \`status\` (\`queued\`/\`running\`/\`done\`/\`failed\`), \`tam\` (Blitz counts), \`progress\`, \`coverage\` (\`email_rate\`, \`reachable_estimate\`, \`verdict\`), \`records_used\`.
+
 <a id="tables-rows-post"></a>
 ### \`POST /tables/:id/rows\` — Send rows
 

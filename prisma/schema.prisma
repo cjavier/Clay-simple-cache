@@ -270,11 +270,17 @@ model TableJob {
   source         String?
   /// { companies: { table_id, name }, people: { table_id, name } }
   tables         Json            @default("{}")
+  /// Background Blitz build (POST /tables with `build`): config, progress, status.
+  build          Json?
+  build_status   String? // queued | running | done | failed
+  build_state    Json            @default("{}")
+  build_error    String?
   created_at     DateTime        @default(now()) @db.Timestamptz(6)
   updated_at     DateTime        @updatedAt @db.Timestamptz(6)
   batches        TableJobBatch[]
 
   @@index([mb_client_id])
+  @@index([build_status])
   @@map("table_jobs")
 }
 
