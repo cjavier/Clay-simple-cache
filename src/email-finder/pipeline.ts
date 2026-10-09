@@ -527,7 +527,18 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
   const candidatesBuilt = candidates.length;
 
   // A spelling that already bounced is dead: never verify it, never guess it.
-  candidates = candidates.filter((email) => !bouncedHere(email));
+  // A spelling that belongs to someone else is worse than dead: `mariana@` at a
+  // domain where Mariana Castillo already reads her mail is not where Mariana
+  // Quiroga's goes, and an email for one landing with the other is a mistake a
+  // bounce would at least have hidden. Short patterns (`first`, `last`) collide
+  // this way, so any address we already hold under another person's name is out.
+  const knownByEmail = new Map(knownEmails.map((k) => [k.email, k]));
+  const isNamed = (k: KnownEmail | undefined) => !!k && (!!k.first || k.slug_parts.length > 0);
+  const ownedByOther = (email: string) => {
+    const k = knownByEmail.get(email);
+    return isNamed(k) && !matchPerson([k!], first, identity.surnames);
+  };
+  candidates = candidates.filter((email) => !bouncedHere(email) && !ownedByOther(email));
 
   const dbPatterns = await getDomainPatterns(domain);
   const inferredPatterns = inferPatternsFromKnownEmails(knownEmails);
@@ -545,7 +556,20 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
       : null;
 
   // ── 6b. A candidate MailBridge already delivered to or heard back from ──
-  const confirmed = candidates.find(confirmedHere);
+  // Only when nothing says the mailbox is someone else's: either it is filed
+  // under no name at all and the spelling carries one of this person's
+  // surnames, or it is filed under this person (matchPerson above would
+  // usually have caught that already).
+  const surnameTokens = identity.surnames
+    .flatMap((x) => x.split(/\s+/))
+    .map((x) => x.replace(/[^a-z]/g, ""))
+    .filter((x) => x.length >= 3);
+  const confirmed = candidates.find(
+    (email) =>
+      confirmedHere(email) &&
+      (isNamed(knownByEmail.get(email)) ||
+        surnameTokens.some((t) => email.split("@")[0].includes(t)))
+  );
   if (confirmed) {
     const advice = advise("address_confirmed", gateway);
     await recordDomainOutcome(domain, true);

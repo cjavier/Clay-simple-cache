@@ -221,6 +221,18 @@ describe("findEmail with mail history", () => {
     expect(verifySpy).not.toHaveBeenCalled();
   });
 
+  it("never hands one person another person's mailbox", async () => {
+    // mariana@ is Mariana Castillo's, delivered; we're looking for Mariana Quiroga.
+    (getDomainPatterns as any).mockResolvedValue([{ pattern: "first", confidence: 1, sample_count: 30 }]);
+    mockPrisma.emailOutcome.findMany.mockResolvedValue([
+      row("mariana@acme.com", { first_name: "Mariana", last_name: "Castillo", pattern: "first", first_visible_send_at: longAgo }),
+      row("pedro@acme.com", { first_name: "Pedro", last_name: "Luna", pattern: "first", first_visible_send_at: longAgo }),
+    ]);
+    const r = await findEmail({ first_name: "Mariana", last_name: "Quiroga", domain: "acme.com" });
+    expect(r.email).not.toBe("mariana@acme.com");
+    expect(r.method).not.toBe("mailbridge_outcome");
+  });
+
   it("refuses a domain whose mail only ever bounced, before spending", async () => {
     mockPrisma.emailOutcome.findMany.mockResolvedValue(
       ["a.b", "c.d", "e.f"].map((l) => row(`${l}@acme.com`, { bounced_at: longAgo }))
