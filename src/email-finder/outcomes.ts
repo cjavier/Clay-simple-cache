@@ -155,7 +155,7 @@ export function derivePattern(
  * order, leaves the row exactly as the latest report describes it — MailBridge
  * sends the contact's current state, not a delta.
  *
- * Written as one `INSERT … SELECT unnest(…)` per chunk rather than a Prisma
+ * Written as one `INSERT … SELECT jsonb_to_recordset(…)` per chunk rather than a Prisma
  * upsert per row: the history backfill is ~200k rows, and a round trip each
  * to the pooled Supabase connection would take the better part of an hour.
  */
@@ -206,7 +206,8 @@ export async function ingestOutcomes(
 
   for (let i = 0; i < prepared.length; i += chunkSize) {
     const c = prepared.slice(i, i + chunkSize);
-    const col = <K extends keyof (typeof c)[number]>(k: K) => c.map((r) => r[k]);
+    // One JSON parameter rather than one array per column: Prisma's array
+    // binding mis-encodes arrays that mix nulls and values.
     await prisma.$executeRaw`
       INSERT INTO email_outcomes (source, source_ref, email, domain, first_name, last_name,
         linkedin_slug, pattern, bounced_at, bounce_type, replied_at, positive_at,
@@ -214,15 +215,11 @@ export async function ingestOutcomes(
       SELECT u.source, u.source_ref, u.email, u.domain, u.first_name, u.last_name,
         u.linkedin_slug, u.pattern, u.bounced_at, u.bounce_type, u.replied_at, u.positive_at,
         u.auto_replied, u.first_visible_send_at, now()
-      FROM unnest(
-        ${col("source")}::text[], ${col("source_ref")}::text[], ${col("email")}::text[],
-        ${col("domain")}::text[], ${col("first_name")}::text[], ${col("last_name")}::text[],
-        ${col("linkedin_slug")}::text[], ${col("pattern")}::text[],
-        ${col("bounced_at")}::timestamptz[], ${col("bounce_type")}::text[],
-        ${col("replied_at")}::timestamptz[], ${col("positive_at")}::timestamptz[],
-        ${col("auto_replied")}::boolean[], ${col("first_visible_send_at")}::timestamptz[]
-      ) AS u(source, source_ref, email, domain, first_name, last_name, linkedin_slug, pattern,
-             bounced_at, bounce_type, replied_at, positive_at, auto_replied, first_visible_send_at)
+      FROM jsonb_to_recordset(${JSON.stringify(c)}::jsonb) AS u(
+        source text, source_ref text, email text, domain text, first_name text, last_name text,
+        linkedin_slug text, pattern text, bounced_at timestamptz, bounce_type text,
+        replied_at timestamptz, positive_at timestamptz, auto_replied boolean,
+        first_visible_send_at timestamptz)
       ON CONFLICT (source, source_ref) DO UPDATE SET
         email = EXCLUDED.email, domain = EXCLUDED.domain,
         first_name = EXCLUDED.first_name, last_name = EXCLUDED.last_name,
