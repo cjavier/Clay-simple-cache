@@ -1,9 +1,10 @@
 import { describe, it, expect, vi } from "vitest";
 
+vi.mock("../../src/services/slack.service", () => ({ postSlackMessage: vi.fn(async () => ({ ok: true })) }));
 vi.mock("../../src/db/prisma", () => ({ default: { emailProvenance: { updateMany: vi.fn(), findMany: vi.fn() } } }));
 
-import { BATCH_ROWS, EvidencePusher, PushError, sendEvidenceBatch } from "../../src/services/evidence-push.service";
-import { ProvenanceEntry } from "../../src/email-finder/provenance";
+import { AUTH_PAUSE_MS, BATCH_ROWS, EvidencePusher, PushError, sendEvidenceBatch } from "../../src/services/evidence-push.service";
+import { metaFromResult, ProvenanceEntry, toEvidenceRows } from "../../src/email-finder/provenance";
 
 function entry(n: number, over: Partial<ProvenanceEntry> = {}): ProvenanceEntry {
   return {
@@ -140,5 +141,67 @@ describe("EvidencePusher", () => {
     await pusher.flush();
     expect(send).not.toHaveBeenCalled();
     expect(logs.filter((l) => /not set/.test(l))).toHaveLength(1);
+  });
+});
+
+describe("auth failure", () => {
+  it("pauses on 401, alerts once, drops the queue for the sweeper, and resumes after the pause", async () => {
+    let t = 1_000;
+    const alerts: string[] = [];
+    let calls = 0;
+    const { pusher } = harness(
+      async () => {
+        calls++;
+        throw new PushError("HTTP 401", 401);
+      },
+      { alert: async (m: string) => void alerts.push(m), now: () => t }
+    );
+    pusher.enqueue([entry(1), entry(2)]);
+    await pusher.flush();
+    expect(calls).toBe(1);
+    expect(pusher.paused).toBe(true);
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toMatch(/401/);
+
+    pusher.enqueue([entry(3)]);
+    await pusher.flush();
+    expect(calls).toBe(1); // nothing sent while paused
+    expect(pusher.pending).toBe(0);
+
+    t += AUTH_PAUSE_MS + 1;
+    expect(pusher.paused).toBe(false);
+    pusher.enqueue([entry(3)]); // not stuck in inFlight from the paused drop
+    await pusher.flush();
+    expect(calls).toBe(2);
+  });
+});
+
+describe("meta → raw and confidence", () => {
+  it("sends the finder's meta in raw and confidence = 1 - expected_bounce", () => {
+    const meta = {
+      send_recommendation: "risky" as const, evidence_tier: "pattern_mostly_ok", expected_bounce: 0.14,
+      mail_gateway: null, mx_provider: "google_workspace", pattern: "first.last", searched_name: { first: "Ana", last: "Ruiz" },
+    };
+    const rows = toEvidenceRows(entry(1, { verifier: null, verdict: "catch_all", confidence: 0.5, meta }));
+    expect(rows).toHaveLength(1);
+    expect(rows[0].confidence).toBe(0.86);
+    expect(rows[0].raw).toMatchObject({ status: "valid", method: "debounce", ...meta });
+  });
+  it("keeps the provider confidence when there is no expected_bounce", () => {
+    const rows = toEvidenceRows(entry(1));
+    expect(rows.find((r) => r.kind === "verified")?.confidence).toBe(0.9);
+  });
+  it("builds meta from a pipeline answer and its request", () => {
+    const m = metaFromResult(
+      { email: "ana.ruiz@x.com", status: "catch_all", confidence: 0.5, method: "domain_pattern", pattern: "first.last",
+        domain_info: { provider: "google_workspace" }, send_recommendation: "send", evidence: "pattern_confirmed",
+        expected_bounce: 0.05, mail_gateway: null } as any,
+      { first_name: "Ana", last_name: "Ruiz" }
+    );
+    expect(m).toEqual({
+      send_recommendation: "send", evidence_tier: "pattern_confirmed", expected_bounce: 0.05, mail_gateway: null,
+      mx_provider: "google_workspace", pattern: "first.last", searched_name: { first: "Ana", last: "Ruiz" },
+    });
+    expect(metaFromResult({ email: null, status: "unknown", confidence: 0, method: null, pattern: null, domain_info: null } as any)).toBeNull();
   });
 });

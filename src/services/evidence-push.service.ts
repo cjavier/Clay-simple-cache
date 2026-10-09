@@ -1,5 +1,6 @@
 import prisma from "../db/prisma";
-import { EvidenceRow, ProvenanceEntry, toEvidenceRows } from "../email-finder/provenance";
+import { EvidenceRow, ProvenanceEntry, ProvenanceMeta, toEvidenceRows } from "../email-finder/provenance";
+import { postSlackMessage } from "./slack.service";
 
 /**
  * Pushes per-email evidence (who found it, who verified it, the verdict) to
@@ -45,6 +46,10 @@ export class PushError extends Error {
   constructor(message: string, public readonly status: number) {
     super(message);
     this.name = "PushError";
+  }
+  /** The key was refused: nothing will get through until someone fixes it. */
+  get authFailure(): boolean {
+    return this.status === 401 || this.status === 403;
   }
   /** Network failure, rate limit, or MailBridge having a bad moment. */
   get retryable(): boolean {
@@ -95,7 +100,13 @@ export interface PusherDeps {
   log?: (msg: string) => void;
   retryDelays?: number[];
   flushAfterMs?: number;
+  /** Shout somewhere a human looks (Slack). Called once per auth pause. */
+  alert?: (msg: string) => Promise<void>;
+  now?: () => number;
 }
+
+/** After a 401/403 the pusher stops sending for this long, then tries once more. */
+export const AUTH_PAUSE_MS = 30 * 60 * 1000;
 
 const realSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -116,11 +127,30 @@ export class EvidencePusher {
       log: deps.log ?? ((m) => console.log(m)),
       retryDelays: deps.retryDelays ?? RETRY_DELAYS_MS,
       flushAfterMs: deps.flushAfterMs ?? FLUSH_AFTER_MS,
+      alert: deps.alert ?? slackAlert,
+      now: deps.now ?? Date.now,
     };
   }
 
+  private pausedUntil = 0;
+
   get pending(): number {
     return this.queue.length;
+  }
+
+  /** True while MailBridge is refusing our key (see AUTH_PAUSE_MS). */
+  get paused(): boolean {
+    return this.deps.now() < this.pausedUntil;
+  }
+
+  private pauseForAuth(err: PushError): void {
+    this.pausedUntil = this.deps.now() + AUTH_PAUSE_MS;
+    const msg =
+      `[evidence-push] MailBridge refused MAILBRIDGE_API_KEY (HTTP ${err.status}). ` +
+      `Evidence is still stored in email_provenance but nothing is sent; pausing ${AUTH_PAUSE_MS / 60000} min. ` +
+      `Fix the key on Railway (Clay-simple-cache) — the sweeper resends everything once it works.`;
+    console.error(msg);
+    this.deps.alert(msg).catch(() => undefined);
   }
 
   /** Never throws and never waits: appends and schedules a flush. */
@@ -196,6 +226,12 @@ export class EvidencePusher {
 
   private async drain(): Promise<void> {
     while (this.queue.length > 0) {
+      if (this.paused) {
+        // Drop what is queued: it is in email_provenance and the sweeper re-queues it after the pause.
+        for (const item of this.queue) this.inFlight.delete(item.id);
+        this.queue = [];
+        return;
+      }
       const batch = this.takeBatch();
       const ids = batch.map((b) => b.id);
       try {
@@ -204,6 +240,7 @@ export class EvidencePusher {
         // Gave up for now. The facts stay unpushed in email_provenance, and the sweeper re-queues them.
         this.deps.log(`[evidence-push] ${batch.length} facts not delivered (kept for the sweeper): ${err?.message || err}`);
         for (const id of ids) this.inFlight.delete(id);
+        if (err instanceof PushError && err.authFailure) this.pauseForAuth(err);
       }
     }
   }
@@ -237,6 +274,10 @@ export class EvidencePusher {
   }
 }
 
+async function slackAlert(msg: string): Promise<void> {
+  await postSlackMessage(`:rotating_light: Clay cache → MailBridge: ${msg}`);
+}
+
 async function markPushed(done: { ids: string[]; rejected: { id: string; reason: string }[] }): Promise<void> {
   const now = new Date();
   if (done.ids.length > 0) {
@@ -257,14 +298,21 @@ const SWEEP_LOOKBACK_DAYS = 14;
 
 /** Re-queue facts MailBridge doesn't have yet (outage, restart, queue overflow). Backfill rows are pushed by their own script. */
 export async function sweepUnpushed(pusher: EvidencePusher = evidencePusher, limit: number = BATCH_ROWS): Promise<number> {
-  if (!evidencePushConfigured()) return 0;
+  if (!evidencePushConfigured() || pusher.paused) return 0;
   const since = new Date(Date.now() - SWEEP_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
   const rows = await prisma.emailProvenance.findMany({
     where: { pushed_at: null, push_error: null, origin: { in: ["find", "verify", "ingest"] }, created_at: { gt: since } },
     orderBy: { created_at: "asc" },
     take: limit,
   });
-  pusher.enqueue(rows.map(rowToEntry));
+  const entries = rows.map(rowToEntry);
+  // A fact with no provider MailBridge accepts produces no rows; close it out so
+  // it doesn't sit at the head of the sweep forever and starve newer facts.
+  const empty = entries.filter((e) => toEvidenceRows(e).length === 0).map((e) => e.id);
+  if (empty.length > 0) {
+    await prisma.emailProvenance.updateMany({ where: { id: { in: empty } }, data: { push_error: "nothing to send" } });
+  }
+  pusher.enqueue(entries.filter((e) => !empty.includes(e.id)));
   return rows.length;
 }
 
@@ -279,6 +327,7 @@ export function rowToEntry(r: {
   method: string | null;
   origin: string;
   checked_at: Date;
+  meta?: unknown;
 }): ProvenanceEntry {
   return {
     id: r.id,
@@ -291,6 +340,7 @@ export function rowToEntry(r: {
     method: r.method,
     origin: r.origin as ProvenanceEntry["origin"],
     checked_at: r.checked_at.toISOString(),
+    meta: (r.meta ?? null) as ProvenanceMeta | null,
   };
 }
 
