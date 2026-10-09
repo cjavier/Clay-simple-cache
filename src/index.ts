@@ -5,6 +5,7 @@ import { startCreditCheckSchedule } from './jobs/credit-check-schedule';
 import { findJobService } from './services/find-job.service';
 import { tableJobService } from './services/table-job.service';
 import { tableBuildService } from './services/table-build.service';
+import { startEvidenceSweeper } from './services/evidence-push.service';
 
 const PORT = process.env.PORT || 3000;
 
@@ -25,6 +26,8 @@ app.listen(PORT, () => {
     // Rows waiting to reach MailBridge (POST /tables/:id/rows): resume what a
     // deploy interrupted and keep sweeping for retries whose backoff is over.
     void tableJobService.start().catch((e) => console.error('[table-jobs] no se pudo arrancar:', e));
+    // Provenance MailBridge doesn't have yet (outage, restart): re-queue it every few minutes.
+    startEvidenceSweeper();
     // Blitz builds a deploy interrupted resume from their last saved chunk.
     void tableBuildService
         .resume()

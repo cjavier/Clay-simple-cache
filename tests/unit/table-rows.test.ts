@@ -95,3 +95,61 @@ describe("tableNames", () => {
     });
   });
 });
+
+describe("toUpsertRow — email verdict (provenance)", () => {
+  const base = { first_name: "Ana", email: "ana@flete.mx", email_source: "blitzapi" };
+  const enforce = { enforceProvenance: true };
+
+  it("enforced: an email with a source but no verdict is rejected with an actionable message", () => {
+    expect(() => toUpsertRow("people", base, 2, enforce)).toThrow(/rows\[2\].*missing: email_verification\.verdict.*"verdict": "unknown"/);
+  });
+
+  it("not enforced (default): the same row is accepted unchanged, so current callers keep working", () => {
+    const row = toUpsertRow("people", base, 0, { enforceProvenance: false });
+    expect(row.data["Email Verdict"]).toBeUndefined();
+    expect(row.sources).toEqual({ Email: "blitzapi" });
+  });
+
+  it("nested email_verification becomes columns MailBridge keeps as variables, and the verifier is the verdict's source", () => {
+    const row = toUpsertRow("people", { ...base, email_verification: { provider: "debounce", verdict: "valid", confidence: 0.9, checked_at: "2026-10-01T00:00:00Z" } }, 0, enforce);
+    expect(row.data).toMatchObject({
+      Email: "ana@flete.mx", "Email Source": "blitzapi", "Email Verifier": "debounce", "Email Verdict": "valid",
+      "Email Checked At": "2026-10-01T00:00:00.000Z", "Email Confidence": 0.9,
+    });
+    expect(row.data.email_verification).toBeUndefined();
+    expect(row.sources).toEqual({ Email: "blitzapi", "Email Verdict": "debounce" });
+  });
+
+  it("an unverified address says so explicitly: verdict unknown, no verifier", () => {
+    const row = toUpsertRow("people", { ...base, email_verification: { provider: null, verdict: "unknown" } }, 0, enforce);
+    expect(row.data["Email Verdict"]).toBe("unknown");
+    expect(row.data["Email Verifier"]).toBeUndefined();
+    expect(row.sources).toEqual({ Email: "blitzapi" });
+  });
+
+  it("the legacy email_status 'valido' (what create_table.py and the Blitz build send) counts as a valid verdict", () => {
+    const row = toUpsertRow("people", { ...base, email_status: "valido" }, 0, enforce);
+    expect(row.data["Email Verdict"]).toBe("valid");
+    expect(row.data["Email Status"]).toBe("valido");
+  });
+
+  it("a bad verdict is rejected even though the source is fine", () => {
+    expect(() => toUpsertRow("people", { ...base, email_verdict: "maybe" }, 0, enforce)).toThrow(/'maybe' is not one of/);
+  });
+
+  it("a person without an email needs no verdict", () => {
+    expect(() => toUpsertRow("people", { first_name: "Beto", linkedin_url: "linkedin.com/in/beto" }, 0, enforce)).not.toThrow();
+  });
+});
+
+import { personRow } from "../../src/services/table-build";
+
+describe("Blitz list build vs enforced provenance", () => {
+  it("every row the background build emits already satisfies the mandatory rule", () => {
+    const withEmail = personRow({ first_name: "Ana", linkedin_url: "https://linkedin.com/in/ana" }, {}, { domain: "flete.mx" }, { found: true, email: "ana@flete.mx" });
+    expect(withEmail.email).toBe("ana@flete.mx");
+    expect(() => toUpsertRow("people", withEmail, 0, { enforceProvenance: true })).not.toThrow();
+    const noEmail = personRow({ first_name: "Beto", linkedin_url: "https://linkedin.com/in/beto" }, {}, { domain: "flete.mx" }, { found: false });
+    expect(() => toUpsertRow("people", noEmail, 0, { enforceProvenance: true })).not.toThrow();
+  });
+});

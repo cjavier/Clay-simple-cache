@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import { UpsertRow } from "./mailbridge.client";
+import { provenanceEnforced, validateIngestProvenance } from "../email-finder/provenance";
 
 /**
  * Rows for a MailBridge list: canonical field names in, MailBridge headers out.
@@ -37,6 +38,10 @@ const PEOPLE_HEADERS: Record<string, string> = {
   email: "Email",
   email_source: "Email Source",
   email_status: "Email Status",
+  email_verifier: "Email Verifier",
+  email_verdict: "Email Verdict",
+  email_checked_at: "Email Checked At",
+  email_confidence: "Email Confidence",
   email_found: "Email Found",
   domain_match: "Domain Match",
   discard_reason: "Discard Reason",
@@ -109,7 +114,13 @@ export function rowRef(kind: TableKind, row: Record<string, unknown>): string {
 }
 
 /** Validate and map one caller row. Throws RowError with the index on bad input. */
-export function toUpsertRow(kind: TableKind, row: unknown, index: number): UpsertRow {
+export function toUpsertRow(
+  kind: TableKind,
+  row: unknown,
+  index: number,
+  opts: { enforceProvenance?: boolean } = {}
+): UpsertRow {
+  const enforce = opts.enforceProvenance ?? provenanceEnforced();
   if (!row || typeof row !== "object" || Array.isArray(row)) throw new RowError("must be an object", index);
   const r = { ...(row as Record<string, unknown>) };
   const headers = HEADERS[kind];
@@ -121,6 +132,31 @@ export function toUpsertRow(kind: TableKind, row: unknown, index: number): Upser
     if (!PROVIDER.test(source)) throw new RowError(`email_source '${r.email_source}' is not a provider id (lowercase, e.g. "blitzapi")`, index);
     r.email_source = source;
     sources[headers.email] = source;
+
+    // Who verified it and what they said. `email_verification` ({provider|null, verdict, ...}) or the flat
+    // `email_verifier`/`email_verdict`; the legacy `email_status: "valido"` counts as a `valid` verdict.
+    const given: Record<string, unknown> = {
+      email_source: source,
+      email_verification: r.email_verification,
+      email_verifier: r.email_verifier,
+      email_verdict: r.email_verdict ?? (typeof r.email_status === "string" && r.email_status.trim().toLowerCase() === "valido" ? "valid" : undefined),
+      email_checked_at: r.email_checked_at,
+      email_confidence: r.email_confidence,
+    };
+    const check = validateIngestProvenance(given);
+    if (check.ok) {
+      const p = check.provenance;
+      delete r.email_verification;
+      r.email_verifier = p.verifier ?? undefined;
+      r.email_verdict = p.verdict;
+      r.email_checked_at = p.checked_at;
+      r.email_confidence = p.confidence ?? undefined;
+      if (p.verifier) sources[headers.email_verdict] = p.verifier;
+    } else if (enforce) {
+      throw new RowError(check.message, index);
+    } else {
+      delete r.email_verification; // an object has no column; the flat fields (if any) pass through
+    }
   }
 
   const data: Record<string, unknown> = {};

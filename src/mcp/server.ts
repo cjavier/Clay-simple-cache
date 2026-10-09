@@ -18,6 +18,16 @@ import { companyService } from "../services/company.service";
 import { dncService } from "../services/dnc.service";
 import { clientService } from "../services/client.service";
 import { findEmail, verifySingleEmail } from "../email-finder";
+import {
+  provenanceFields,
+  provenanceEnforced,
+  validateIngestProvenance,
+  storedProvenance,
+  ingestEntry,
+  callerGaveDate,
+} from "../email-finder/provenance";
+import { recordProvenance } from "../services/provenance.service";
+import { getOutcomesForEmails } from "../email-finder/outcomes";
 import { detectTechnologies, FetchFailError } from "../services/tech-detector.service";
 import { findLinkedInForDomain } from "../services/linkedin-finder.service";
 import { LlmApiError, LlmConfigError } from "../services/llm.service";
@@ -199,6 +209,7 @@ export function buildMcpServer(): McpServer {
         evidence: result.evidence,
         expected_bounce: result.expected_bounce,
         mail_gateway: result.mail_gateway ?? null,
+        ...provenanceFields(result),
         cost_usd: result.cost_usd,
         duration_ms: result.duration_ms,
         ...(dncRequested ? { do_not_contact: false } : {}),
@@ -251,6 +262,7 @@ export function buildMcpServer(): McpServer {
         send_recommendation: result.send_recommendation,
         evidence: result.evidence,
         mail_gateway: result.mail_gateway ?? null,
+        ...provenanceFields(result),
         cost_usd: result.cost_usd,
         duration_ms: result.duration_ms,
         ...(dncRequested ? { do_not_contact: false } : {}),
@@ -341,9 +353,14 @@ export function buildMcpServer(): McpServer {
         });
       }
 
+      const bounced = profile.email
+        ? (await getOutcomesForEmails([String(profile.email).toLowerCase()])).get(String(profile.email).toLowerCase())?.status === "bounced"
+        : false;
+
       return ok({
         result: 1,
         ...(profile.data as object),
+        ...(bounced ? { email_hard_bounced: true, email_verdict: "invalid" } : {}),
         id: profile.id,
         email: profile.email,
         linkedin_slug: profile.linkedin_slug,
@@ -363,7 +380,10 @@ export function buildMcpServer(): McpServer {
         "Save or enrich a person profile in the cache. Looks up an existing record by any provided " +
         "identifier (priority: email > linkedin_url > linkedin_slug > phone) and merges new fields into it, " +
         "or creates a new profile. Use this to persist enrichment data (title, company, etc.) you've gathered " +
-        "so future lookups (get_profile) are free cache hits instead of paid re-enrichment.",
+        "so future lookups (get_profile) are free cache hits instead of paid re-enrichment. " +
+        "An email must always come with its provenance: `email_source` (the provider that FOUND it) and " +
+        "`email_verification` ({provider|null, verdict}); use verdict \"unknown\" for an address nobody verified. " +
+        "Never invent a provider. With PROVENANCE_ENFORCE on, a call with an email and without them is refused.",
       inputSchema: {
         email: z.string().optional().describe("Person's email. At least one of email/linkedin_url/phone is required."),
         linkedin_url: z.string().optional().describe("Full LinkedIn profile URL."),
@@ -372,6 +392,19 @@ export function buildMcpServer(): McpServer {
           .record(z.string(), z.unknown())
           .optional()
           .describe("Free-form object of extra fields to store/merge (e.g. {title, company, seniority})."),
+        email_source: z
+          .string()
+          .optional()
+          .describe("REQUIRED when `email` is sent: provider that FOUND the address (e.g. findymail, blitzapi, clay_cache)."),
+        email_verification: z
+          .object({
+            provider: z.string().nullable().optional().describe("Verifier that checked it (e.g. emaillistverify, debounce), or null when nobody did."),
+            verdict: z.string().describe("valid | invalid | catch_all | unknown | risky. Use unknown when it was never verified."),
+            checked_at: z.string().optional().describe("ISO 8601 date of the verification."),
+            confidence: z.number().optional().describe("0..1"),
+          })
+          .optional()
+          .describe("REQUIRED when `email` is sent: who verified the address and what they said."),
       },
       annotations: {
         title: "Upsert Profile",
@@ -380,8 +413,8 @@ export function buildMcpServer(): McpServer {
         openWorldHint: false,
       },
     },
-    safe(async ({ email, linkedin_url, phone, data }) => {
-      const extraData = (data ?? {}) as Record<string, unknown>;
+    safe(async ({ email, linkedin_url, phone, data, email_source, email_verification }) => {
+      const extraData = { ...((data ?? {}) as Record<string, unknown>) };
 
       const normalizedEmail = email ? normalizeEmail(email) : null;
       const normalizedLinkedin = linkedin_url ? normalizeLinkedIn(linkedin_url) : null;
@@ -391,6 +424,12 @@ export function buildMcpServer(): McpServer {
       if (!normalizedEmail && !normalizedLinkedin && !normalizedPhone) {
         return fail("At least one identity key (email, linkedin_url, phone) is required.");
       }
+
+      // An email must say where it came from and who verified it.
+      const provFields = { email_source, email_verification };
+      const provenanceCheck = normalizedEmail ? validateIngestProvenance(provFields) : null;
+      if (provenanceCheck && !provenanceCheck.ok && provenanceEnforced()) return fail(provenanceCheck.message);
+      if (provenanceCheck?.ok) Object.assign(extraData, storedProvenance(provenanceCheck.provenance));
 
       const identityKeys = {
         email: normalizedEmail || undefined,
@@ -475,10 +514,17 @@ export function buildMcpServer(): McpServer {
         }
       }
 
+      if (normalizedEmail && provenanceCheck?.ok) {
+        void recordProvenance([ingestEntry(normalizedEmail, provenanceCheck.provenance, callerGaveDate({ email_verification }))]);
+      }
+
       return ok({
         status: "ok",
         resolved_by: resolutionType,
         profile_id: finalProfileId,
+        ...(normalizedEmail && provenanceCheck && !provenanceCheck.ok
+          ? { provenance: { recorded: false, will_be_rejected: true, missing: provenanceCheck.missing, message: provenanceCheck.message } }
+          : {}),
         saved_data: {
           id: finalProfileId,
           email: normalizedEmail,

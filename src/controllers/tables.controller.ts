@@ -143,7 +143,15 @@ export const tablesController = {
       }
       const batchIds = await tableJobService.enqueue(job.id, kind, mapped);
       const withEmail = mapped.filter((r) => r.sources?.Email).length;
-      res.status(202).json({ accepted: mapped.length, with_email: withEmail, batches: batchIds.length, status: `/tables/${job.id}` });
+      // Rows with an email but no verdict are accepted only while PROVENANCE_ENFORCE is off.
+      const withoutVerdict = mapped.filter((r) => r.sources?.Email && !r.data["Email Verdict"]).length;
+      res.status(202).json({
+        accepted: mapped.length,
+        with_email: withEmail,
+        ...(withoutVerdict ? { without_verdict: withoutVerdict, warning: "rows with an email need email_verification.verdict (or email_status \"valido\"); this will be rejected once PROVENANCE_ENFORCE is on" } : {}),
+        batches: batchIds.length,
+        status: `/tables/${job.id}`,
+      });
     } catch (err) {
       console.error("Table rows error:", err);
       res.status(500).json({ error: "Internal server error" });

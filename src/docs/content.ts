@@ -147,9 +147,18 @@ Create or update a profile. Looks for an existing record by any provided identif
 | \`linkedin_url\` | string | No* | — | Full LinkedIn profile URL; slug is extracted and stored alongside the full URL. |
 | \`linkedin_profile\` | string | No* | — | Alias for \`linkedin_url\`. |
 | \`phone\` | string | No* | — | Normalized to E.164 (via \`libphonenumber-js\`). |
+| \`email_source\` | string | **Yes, with an \`email\`** | — | Provider that **found** the address (\`findymail\`, \`blitzapi\`, \`clay_cache\`…): lowercase letters, digits, \`_ . -\`, 2–60 chars. See [provenance](#provenance). |
+| \`email_verification\` | object | **Yes, with an \`email\`** | — | \`{ "provider": "<verifier>" \\| null, "verdict": "valid\\|invalid\\|catch_all\\|unknown\\|risky", "checked_at"?: ISO date, "confidence"?: 0..1 }\`. \`verdict\` is required — send \`"unknown"\` for an address nobody verified. Flat alternative for Clay columns: \`email_verifier\`, \`email_verdict\`, \`email_checked_at\`, \`email_confidence\`. |
 | ...anything else | any | No | — | Stored verbatim in the \`data\` object and merged with existing data on future calls. |
 
 \\* At least one of \`email\`, \`linkedin_url\`/\`linkedin_profile\`, or \`phone\` is required.
+
+<a id="provenance"></a>
+**Provenance is mandatory when the payload carries an email.** Every address must say who found it and who verified it, because MailBridge grades finders and verifiers against the bounces it sees and can only do that per provider. With \`PROVENANCE_ENFORCE=true\` a payload with an email and without \`email_source\` / \`email_verification.verdict\` is rejected with \`400\`:
+\`\`\`json
+{ "error": "A payload with an email must say where it came from and who verified it (missing: email_source, email_verification.verdict). Send \\"email_source\\": ...", "code": "PROVENANCE_REQUIRED", "missing": ["email_source", "email_verification.verdict"] }
+\`\`\`
+While enforcement is off (the default during the rollout) the call is accepted and the response says what would be rejected: \`"provenance": { "recorded": false, "will_be_rejected": true, "missing": [...] }\`. A payload **without** an email needs none. Accepted provenance is stored in the profile as \`data.email_source\` + \`data.email_verification\`, kept as history, and forwarded to MailBridge as \`found\` / \`verified\` evidence. Re-posting the same claim does not create a second fact.
 
 **Response — \`200\`**:
 \`\`\`json
@@ -164,17 +173,18 @@ Create or update a profile. Looks for an existing record by any provided identif
     "linkedin_url": "https://www.linkedin.com/in/juan-garcia",
     "phone_e164": "+525512345678",
     "data": { "title": "VP Sales", "linkedin_url": "...", "phone_national": "..." }
-  }
+  },
+  "provenance": { "recorded": true, "finder": "findymail", "verifier": "emaillistverify", "verdict": "valid" }
 }
 \`\`\`
-\`resolved_by\` is one of \`email\` \\| \`linkedin_url\` \\| \`linkedin_slug\` \\| \`phone_e164\` \\| \`new\` (freshly created) \\| \`race\` (a concurrent request won the create and this call merged into it).
+\`provenance\` is present only when the payload had an email. \`resolved_by\` is one of \`email\` \\| \`linkedin_url\` \\| \`linkedin_slug\` \\| \`phone_e164\` \\| \`new\` (freshly created) \\| \`race\` (a concurrent request won the create and this call merged into it).
 
 **Errors**: \`400\` \`{ "error": "At least one identity key (email, linkedin_url, phone) is required." }\`; \`500\` on unexpected failure.
 
 \`\`\`bash
 curl -X POST {{BASE_URL}}/profiles \\
   -H "Authorization: Bearer your_secret_key" -H "Content-Type: application/json" \\
-  -d '{"email": "juan@empresa.com", "linkedin_url": "https://linkedin.com/in/juan-garcia", "title": "VP Sales"}'
+  -d '{"email": "juan@empresa.com", "email_source": "findymail", "email_verification": {"provider": "emaillistverify", "verdict": "valid"}, "linkedin_url": "https://linkedin.com/in/juan-garcia", "title": "VP Sales"}'
 \`\`\`
 
 <a id="profiles-get"></a>
@@ -308,10 +318,16 @@ The search spends in this order, stopping at the first answer: addresses already
   "permutations_tried": 1,
   "identity_source": "linkedin",
   "surnames_tried": ["garcia", "garcialopez", "lopez"],
+  "finder": "clay_cache",
+  "verifier": "emaillistverify",
+  "verdict": "valid",
+  "checked_at": "2026-10-09T15:21:24.175Z",
+  "hard_bounced": false,
   "cost_usd": 0.0004,
   "duration_ms": 983
 }
 \`\`\`
+**Provenance fields** (new, additive — nothing was removed): \`finder\` is the provider that produced the address (\`clay_cache\` when this service spelled it from a name and a pattern, \`serper\` when a SERP hit spelled it exactly); \`verifier\` is the provider whose probe gave the verdict (\`emaillistverify\`, \`debounce\`…) or \`null\` when nobody probed (pattern guess, answered from \`profiles\`); \`verdict\` is \`status\` normalized to \`valid\` \\| \`invalid\` \\| \`catch_all\` \\| \`unknown\` \\| \`risky\` (\`disposable\`/\`role_account\` → \`risky\`, \`no_mx\` → \`invalid\`; \`status\` keeps the raw value); \`checked_at\` is when the verdict was produced (the original verification date for an answer served from cache); \`hard_bounced\` is \`true\` when MailBridge saw this address hard-bounce — then \`verdict\` is \`invalid\` whatever any cache holds. \`method\` is now only the decision path, not the provider. Each new fact is also pushed to MailBridge (see [Evidence push](#evidence-push)).
 \`status\`: \`valid\` \\| \`invalid\` \\| \`catch_all\` \\| \`unknown\` \\| \`risky\` \\| \`disposable\` \\| \`no_mx\` \\| \`role_account\`.
 \`method\`: \`local_syntax\` \\| \`local_dns\` \\| \`emaillistverify\` \\| \`debounce\` \\| \`bouncer\` \\| \`neverbounce\` \\| \`serp_pattern\` \\| \`known_email\` \\| \`domain_pattern\` \\| \`domain_muted\`.
 \`identity_source\`: where the surnames came from — \`linkedin\` (recovered from the slug), \`full_name\`, or \`given\` (the \`last_name\` as sent).
@@ -372,10 +388,17 @@ Checks two caches before spending: the 30-day verification cache, then the addre
   "confidence": 0.95,
   "method": "emaillistverify",
   "domain_info": { "domain": "empresa.com", "has_mx": true, "provider": "google_workspace", "is_catch_all": false, "is_disposable": false, "is_free_provider": false },
+  "finder": null,
+  "verifier": "emaillistverify",
+  "verdict": "valid",
+  "checked_at": "2026-10-09T15:21:24.175Z",
+  "hard_bounced": false,
   "cost_usd": 0.0004,
   "duration_ms": 450
 }
 \`\`\`
+Same provenance fields as \`/find\`. \`finder\` is \`null\` here unless the address is already in \`profiles\`, where it is the \`email_source\` recorded when it was ingested.
+
 Blocked case: only \`{ "do_not_contact": true, "matched_by": "..." }\`. Otherwise adds \`"do_not_contact": false\`.
 
 **Errors**: \`400\` missing \`email\`; \`404\` \`dnc_client\` not found.
@@ -416,6 +439,11 @@ Blocked case: only \`{ "do_not_contact": true, "matched_by": "..." }\`. Otherwis
 - \`agreement_rate\` — of the answers where \`profiles\` independently holds an address for the same person, how many match ours. This is accuracy.
 - \`delivery_rate\` — whether the address we returned exists in \`profiles\` at all, i.e. whether the caller was still listening when it arrived. Answers under 30s landed 99.3% of the time; answers over an hour, 29.4%.
 - \`comparable\` — how many answers had an independent address to compare against. A rate computed from a handful of them means nothing; the alerting ignores anything under 40.
+
+**\`outcomes_by_provenance\`** (last 30 days) is the real bounce rate cut by who found and who verified the address: \`by_finder\` (\`finder\`), \`by_verifier_verdict\` (\`verifier\` + \`verdict\`) and \`by_method\` (\`method\`), each row \`{ emails, sent, bounced, bounce_rate }\`. \`sent\` counts addresses with a first visible send (a mailbox whose bounces MailBridge can see; Maildoso filters its own), \`bounced\` those that hard-bounced. It comes from \`email_provenance\` joined to the outcomes MailBridge reports to \`POST /webhooks/mailbridge\`; it is \`null\` if either table is unreachable.
+
+<a id="evidence-push"></a>
+**Evidence push to MailBridge.** Every new fact from \`/find\`, \`/verify\` and \`POST /profiles\` (not echoes of the cache) is stored in \`email_provenance\` and queued, without blocking the response, for MailBridge's \`POST /email-evidence\`: \`found\` (provider = the finder) and \`verified\` (provider = the verifier, with verdict and confidence), \`sourceRef\` \`ccache:find|verify|ingest:<id>\` so a repeat never duplicates. Batches of up to 500, retried with backoff; a sweeper re-queues anything MailBridge doesn't have yet. Needs \`MAILBRIDGE_API_KEY\` (\`MAILBRIDGE_API_URL\` optional); without the key it logs once and only stores. Historical rows: \`scripts/backfill_provenance.ts\`.
 
 <a id="stats-history-get"></a>
 ### \`GET /stats/history\` — Recorded Quality Snapshots
@@ -858,6 +886,8 @@ Known fields are mapped to the headers MailBridge's promote already understands;
 - **companies**: \`company, domain, website, linkedin_url, industry, company_size, employees_on_linkedin, followers, founded_year, company_type, state, city, country, description, specialties, contacts_found, contacts_with_email\`
 
 Row identity (\`ref\`): an explicit \`ref\` if sent, else the LinkedIn URL, else the email (people) or domain (companies), else a hash of the row. Send the same row again to update it.
+
+**Provenance**: a people row with an \`email\` always needs \`email_source\` (the finder) and, with \`PROVENANCE_ENFORCE=true\`, also its verdict: \`email_verification: { provider|null, verdict, checked_at?, confidence? }\`, the flat \`email_verifier\` / \`email_verdict\` / \`email_checked_at\` / \`email_confidence\`, or the legacy \`email_status: "valido"\` (counts as \`valid\`). They travel to MailBridge as the columns \`Email Source\`, \`Email Verifier\`, \`Email Verdict\`, \`Email Checked At\`, \`Email Confidence\` (and the verifier is the provenance of the \`Email Verdict\` cell). Without enforcement, rows with an email but no verdict are accepted and the response carries \`without_verdict\` and a \`warning\`.
 
 **Validation is all-or-nothing**: one bad row (e.g. an email without \`email_source\`) rejects the request with \`400\` and \`accepted: 0\`.
 

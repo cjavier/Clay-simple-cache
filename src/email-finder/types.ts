@@ -98,6 +98,15 @@ export interface VerificationResult {
   expected_bounce?: number;
   /** Security gateway in front of the mailbox, when one is known (mimecast…). */
   mail_gateway?: string | null;
+  /**
+   * Provenance (see provenance.ts). `method` above is the decision path; these
+   * say who found the address, who verified it and what the verdict was.
+   */
+  finder?: string | null;
+  verifier?: string | null;
+  /** valid | invalid | catch_all | unknown | risky — `status` keeps the raw value. */
+  verdict?: "valid" | "invalid" | "catch_all" | "unknown" | "risky";
+  checked_at?: string;
 }
 
 export interface FindRequest {
