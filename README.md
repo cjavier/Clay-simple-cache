@@ -184,6 +184,7 @@ See the full, always-current API reference at `GET /docs/api` (e.g. `http://loca
   - `POST /tables`: Create a list's tables (companies + people) in MailBridge for a client; returns a job id and the MailBridge table ids.
   - `POST /tables/:id/rows`: Queue up to 5,000 rows; they reach MailBridge in the background, upserted by a stable `ref`. **A people row with an email must carry `email_source`** (e.g. `blitzapi`), stored as the "Email Source" column and as the Email cell's provider.
   - `GET /tables/:id`: Sync status per table (`?live=1` also reads MailBridge's row count). `POST /tables/:id/retry` requeues refused batches.
+  - The people table also gets an **"Email (cascada)" enrichment column**: Prospeo → Findymail → Clay function "Get Email (External)" (`CLAY_EMAIL_ROUTINE_ID`, default `function:t_0tmngxlhD8r7p6ZuRYZ`), only on rows without an email. It never runs by itself (each step costs credits): run it from MailBridge on the rows you choose. The cell keeps the provider that found the email. `email_waterfall: false` skips it.
   - Needs `MAILBRIDGE_API_KEY` (+ optional `MAILBRIDGE_API_URL`).
 
 - **Misc**

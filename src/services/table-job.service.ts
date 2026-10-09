@@ -1,6 +1,7 @@
 import crypto from "crypto";
 import prisma from "../db/prisma";
 import { mailbridge, MailBridgeError, UpsertRow } from "./mailbridge.client";
+import { emailWaterfallColumn } from "./email-waterfall";
 import { TableKind, tableNames } from "./table-rows";
 import type { BuildConfig } from "./table-build.service";
 
@@ -39,6 +40,8 @@ export interface CreateInput {
   source?: string | null;
   /** Build the list in the background from Blitz (see table-build.service.ts). */
   build?: BuildConfig | null;
+  /** Add the email waterfall column to the people table (default true; it never runs by itself). */
+  email_waterfall?: boolean;
 }
 
 let draining = false;
@@ -58,10 +61,19 @@ export const tableJobService = {
       filters: input.filters ?? {},
     };
 
-    const tables: Record<string, { table_id: string; name: string }> = {};
+    const tables: Record<string, { table_id: string; name: string; email_waterfall?: string }> = {};
     for (const kind of input.kinds) {
       const t = await mailbridge.createTable(client.id, names[kind], { ...sourceConfig, kind });
       tables[kind] = { table_id: t.id, name: t.name };
+      if (kind === "people" && input.email_waterfall !== false) {
+        // A missing column must not cost the list: report it and move on.
+        try {
+          await mailbridge.addColumn(t.id, emailWaterfallColumn());
+          tables[kind].email_waterfall = "added";
+        } catch (e: any) {
+          tables[kind].email_waterfall = `failed: ${String(e?.message || e).slice(0, 200)}`;
+        }
+      }
     }
 
     await prisma.tableJob.create({

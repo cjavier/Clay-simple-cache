@@ -101,6 +101,11 @@ export const mailbridge = {
     return { id: t.id, name: t.name };
   },
 
+  async addColumn(tableId: string, column: Record<string, unknown>): Promise<{ id: string; key: string }> {
+    const c = await call<any>("POST", `/tables/${tableId}/columns`, column);
+    return { id: c.id, key: c.key };
+  },
+
   /** Upsert by `ref`: resending a batch updates the same rows instead of duplicating them. */
   async upsertRows(tableId: string, rows: UpsertRow[]): Promise<{ inserted: number; updated: number; rowCount: number }> {
     const r = await call<any>("POST", `/tables/${tableId}/rows`, { rows }, 120_000);

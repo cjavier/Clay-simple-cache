@@ -102,6 +102,7 @@ export const tablesController = {
         filters: b.filters,
         source: text(b.source, 40) ?? (build ? "blitzapi" : null),
         build,
+        email_waterfall: b.email_waterfall !== false,
       });
       if (build) tableBuildService.start(job.id);
       res.status(201).json({
