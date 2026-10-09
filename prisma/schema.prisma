@@ -337,3 +337,33 @@ model EmailOutcome {
   @@index([domain])
   @@map("email_outcomes")
 }
+
+/// Who found an address and who verified it, one row per fact (history, not
+/// just the last answer). `finder` and `verifier` are providers; `method` is the
+/// decision path and is no longer the provider. Pushed to MailBridge as
+/// `found`/`verified` evidence (POST /email-evidence); `pushed_at` is the
+/// durable outbox. See src/email-finder/provenance.ts.
+model EmailProvenance {
+  id          String    @id @db.Uuid
+  email       String
+  finder      String?
+  verifier    String?
+  /// valid | invalid | catch_all | unknown | risky
+  verdict     String
+  /// The status as the pipeline or caller said it (disposable, no_mx…).
+  raw_status  String?
+  confidence  Float?
+  method      String?
+  /// find | verify | ingest | backfill_search | backfill_cache
+  origin      String
+  checked_at  DateTime  @db.Timestamptz(6)
+  pushed_at   DateTime? @db.Timestamptz(6)
+  push_error  String?
+  created_at  DateTime  @default(now()) @db.Timestamptz(6)
+
+  @@index([email])
+  @@index([pushed_at, created_at])
+  @@index([finder])
+  @@index([verifier, verdict])
+  @@map("email_provenance")
+}
