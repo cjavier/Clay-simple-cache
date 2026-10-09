@@ -3,6 +3,19 @@ import { normalizeEmail, normalizeLinkedIn, normalizePhone } from '../services/n
 import { profileService } from '../services/profile.service';
 import { dncService } from '../services/dnc.service';
 import { resolveClientOr404 } from './client-resolver';
+import {
+    callerGaveDate,
+    ingestEntry,
+    provenanceEnforced,
+    splitIngestFields,
+    storedProvenance,
+    validateIngestProvenance,
+    IngestCheck,
+} from '../email-finder/provenance';
+import { recordProvenance } from '../services/provenance.service';
+import { getOutcomesForEmails } from '../email-finder/outcomes';
+
+let missingProvenanceCount = 0;
 
 export const profilesController = {
     /**
@@ -11,7 +24,10 @@ export const profilesController = {
      */
     async upsert(req: Request, res: Response): Promise<void> {
         try {
-            const { email, linkedin_url, linkedin_profile, phone, ...extraData } = req.body;
+            const { email, linkedin_url, linkedin_profile, phone, ...bodyRest } = req.body;
+            // Provenance (who found the email, who verified it) is pulled out of the free-form
+            // data: it is validated, normalized and stored in a fixed shape.
+            const { fields: provFields, rest: extraData } = splitIngestFields(bodyRest);
 
             // 1. Normalize Keys
             const normalizedEmail = email ? normalizeEmail(email as string) : null;
@@ -24,6 +40,24 @@ export const profilesController = {
             if (!normalizedEmail && !normalizedLinkedin && !normalizedPhone) {
                 res.status(400).json({ error: 'At least one identity key (email, linkedin_url, phone) is required.' });
                 return;
+            }
+
+            // 1b. An email must say where it came from and who verified it.
+            let provenanceCheck: IngestCheck | null = null;
+            if (normalizedEmail) {
+                provenanceCheck = validateIngestProvenance(provFields);
+                if (!provenanceCheck.ok && provenanceEnforced()) {
+                    res.status(400).json({ error: provenanceCheck.message, code: 'PROVENANCE_REQUIRED', missing: provenanceCheck.missing });
+                    return;
+                }
+                if (provenanceCheck.ok) {
+                    Object.assign(extraData, storedProvenance(provenanceCheck.provenance));
+                } else {
+                    // Not enforced yet: keep whatever the caller sent, as before.
+                    Object.assign(extraData, provFields);
+                }
+            } else {
+                Object.assign(extraData, provFields);
             }
 
             // 2. Find existing profile
@@ -141,9 +175,26 @@ export const profilesController = {
                 }
             }
 
+            let provenanceReport: Record<string, unknown> | undefined;
+            if (normalizedEmail && provenanceCheck) {
+                if (provenanceCheck.ok) {
+                    const p = provenanceCheck.provenance;
+                    void recordProvenance([ingestEntry(normalizedEmail, p, callerGaveDate(provFields))]);
+                    provenanceReport = { recorded: true, finder: p.finder, verifier: p.verifier, verdict: p.verdict };
+                } else {
+                    // Visible in the response (and Clay's column output) before enforcement turns it into a 400.
+                    provenanceReport = { recorded: false, will_be_rejected: true, missing: provenanceCheck.missing, message: provenanceCheck.message };
+                    // One line per 100 calls: Clay posts thousands of rows a day.
+                    if (missingProvenanceCount++ % 100 === 0) {
+                        console.warn(`[provenance] POST /profiles without provenance (${missingProvenanceCount} so far; ${provenanceCheck.missing.join(', ') || 'invalid fields'})`);
+                    }
+                }
+            }
+
             res.json({
                 status: 'ok',
                 resolved_by: resolutionType,
+                ...(provenanceReport ? { provenance: provenanceReport } : {}),
                 profile_id: finalProfileId,
                 saved_data: {
                     id: finalProfileId,
@@ -236,9 +287,15 @@ export const profilesController = {
                 return;
             }
 
+            // A hard-bounced address is never served as good again, cache or not.
+            const bounced = profile.email
+                ? (await getOutcomesForEmails([profile.email])).get(String(profile.email).toLowerCase())?.status === 'bounced'
+                : false;
+
             res.json({
                 result: 1,
                 ...profile.data as object,
+                ...(bounced ? { email_hard_bounced: true, email_verdict: 'invalid' } : {}),
                 id: profile.id,
                 email: profile.email,
                 linkedin_slug: profile.linkedin_slug,
