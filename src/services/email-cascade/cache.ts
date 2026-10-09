@@ -52,8 +52,25 @@ export function splitName(p: CascadePerson): { first: string; last: string } {
   return { first, last };
 }
 
+/**
+ * Personal mailboxes are never a work email: a finder that returns one (Clay's
+ * Wiza step gave cesar@gmx.ch for a CFO, 2026-10-09) matched another person or
+ * a private inbox, so the cache does not hand it out.
+ */
+const PERSONAL_DOMAINS = new Set([
+  "gmail.com", "googlemail.com", "hotmail.com", "hotmail.es", "outlook.com", "outlook.es", "live.com", "live.com.mx",
+  "msn.com", "yahoo.com", "yahoo.com.mx", "yahoo.es", "ymail.com", "icloud.com", "me.com", "mac.com", "aol.com",
+  "gmx.com", "gmx.net", "gmx.de", "gmx.ch", "gmx.es", "web.de", "mail.com", "protonmail.com", "proton.me",
+  "zoho.com", "yandex.com", "yandex.ru", "qq.com", "163.com", "prodigy.net.mx", "infinitummail.com",
+]);
+
+export function isPersonalEmail(email: string | null | undefined): boolean {
+  const domain = (email || "").trim().toLowerCase().split("@")[1] || "";
+  return PERSONAL_DOMAINS.has(domain);
+}
+
 function usableCached(profile: { email: string | null; data: unknown }): boolean {
-  if (!profile.email) return false;
+  if (!profile.email || isPersonalEmail(profile.email)) return false;
   const data = isObj(profile.data) ? profile.data : {};
   const verdict = isObj(data.email_verification) ? normalizeVerdict(data.email_verification.verdict) : null;
   return verdict !== "invalid";

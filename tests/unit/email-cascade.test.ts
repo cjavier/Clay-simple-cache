@@ -301,6 +301,11 @@ describe("POST /emails/lookup — the cache read", () => {
     expect(await lookupCachedEmail(ana)).toBeNull();
   });
 
+  it("a personal mailbox (gmx, gmail…) is not a work email, even if a finder returned it", async () => {
+    db.profiles.push({ id: "p5", email: "cesar@gmx.ch", linkedin_slug: "cesar-maupome", data: { email_source: "wiza", email_verification: { verdict: "valid" } } });
+    expect(await lookupCachedEmail({ linkedin_url: "linkedin.com/in/cesar-maupome" })).toBeNull();
+  });
+
   it("the endpoint answers the MailBridge contract, free", async () => {
     db.profiles.push({ id: "p1", email: "ana@acme.mx", linkedin_slug: "ana-lopez", data: { email_source: "prospeo", email_verification: { provider: "prospeo", verdict: "valid" } } });
     const { emailsController } = await import("../../src/controllers/emails.controller");
