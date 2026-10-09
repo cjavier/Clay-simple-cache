@@ -9,6 +9,7 @@ import { dncController } from './controllers/dnc.controller';
 import { copyController } from './controllers/copy.controller';
 import { exploreController } from './controllers/explore.controller';
 import { mcpController } from './controllers/mcp.controller';
+import { tablesController } from './controllers/tables.controller';
 
 import { creditsController } from './controllers/credits.controller';
 import { docsController } from './controllers/docs.controller';
@@ -59,6 +60,12 @@ router.post('/copy', authMiddleware, copyController.generate);
 
 // Explore Agent (LLM + function calling)
 router.post('/explore', authMiddleware, exploreController.explore);
+
+// Lists for MailBridge clients: create the tables now, fill them in the background.
+router.post('/tables', authMiddleware, tablesController.create);
+router.get('/tables/:id', authMiddleware, tablesController.get);
+router.post('/tables/:id/rows', authMiddleware, tablesController.addRows);
+router.post('/tables/:id/retry', authMiddleware, tablesController.retry);
 
 // MCP (Model Context Protocol) server — Streamable HTTP, stateless.
 router.post('/mcp', authMiddleware, mcpController.handle);

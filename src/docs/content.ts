@@ -59,6 +59,8 @@ curl -H "Authorization: Bearer your_secret_key" {{BASE_URL}}/profiles?email=test
   - [\`dnc_client\` semantics](#dnc-client-semantics)
 - [11. AI — Copy & Explore](#ai)
   - [\`POST /copy\`](#copy-post) · [\`POST /explore\`](#explore-post)
+- [11b. Lists for MailBridge](#tables)
+  - [\`POST /tables\`](#tables-post) · [\`POST /tables/:id/rows\`](#tables-rows-post) · [\`GET /tables/:id\`](#tables-get) · [\`POST /tables/:id/retry\`](#tables-retry-post)
 - [12. MCP Server](#mcp-server)
 - [13. Errors & Limits](#errors-and-limits)
 - [14. For AI Agents (llms.txt style)](#for-ai-agents)
@@ -92,6 +94,10 @@ curl -H "Authorization: Bearer your_secret_key" {{BASE_URL}}/profiles?email=test
 | \`GET\` | \`/dnc\` | List a client's DNC entries. | [Clients & DNC](#dnc-get) |
 | \`POST\` | \`/copy\` | Generate copy from a prompt (LLM). | [AI](#copy-post) |
 | \`POST\` | \`/explore\` | Run a research agent (SERP + page fetch, LLM). | [AI](#explore-post) |
+| \`POST\` | \`/tables\` | Create a list's tables in MailBridge for a client; returns a job id. | [Lists](#tables-post) |
+| \`POST\` | \`/tables/:id/rows\` | Queue rows for those tables; MailBridge receives them in the background. | [Lists](#tables-rows-post) |
+| \`GET\` | \`/tables/:id\` | Sync status per table (received, sent, pending, failed). | [Lists](#tables-get) |
+| \`POST\` | \`/tables/:id/retry\` | Requeue the batches MailBridge refused. | [Lists](#tables-retry-post) |
 | \`POST\` | \`/mcp\` | MCP (Model Context Protocol) JSON-RPC endpoint — Streamable HTTP, stateless. | [MCP Server](#mcp-server) |
 | \`GET\`/\`DELETE\` | \`/mcp\` | \`405\` — this MCP server is stateless (no sessions to fetch/delete). | [MCP Server](#mcp-server) |
 | \`GET\` | \`/llms.txt\` | Machine-readable service summary for LLM agents (no auth). | [MCP Server](#mcp-server) |
@@ -790,6 +796,68 @@ With \`response_schema\`, \`message\` looks like:
 \`\`\`
 
 **Errors**: \`400\` \`{ "error": "prompt is required" }\`; \`400\` \`{ "error": "max_steps must be a positive number" }\`; \`400\` \`{ "error": "model must be a string" }\`; \`400\` \`{ "error": "response_schema must be a JSON object" }\`; \`503\` \`{ "error": "OPENAI_API_KEY is not configured" }\` (or \`DEEPSEEK_API_KEY\`, per provider); \`502\` upstream LLM failure; \`500\` unexpected.
+
+---
+
+<a id="tables"></a>
+## 11b. Lists for MailBridge
+
+A list is built for one MailBridge client and lives in MailBridge as two tables (spec 57 tables, \`sourceKind: "webhook"\`): companies and people. This API creates the tables, then forwards rows to them **in the background**, in batches, retrying while MailBridge is down or deploying. MailBridge upserts every row by a stable \`ref\`, so a retried batch — or a later enrichment of the same person — updates the same row instead of adding one.
+
+**Every email carries its source.** A people row with an \`email\` must also send \`email_source\` (a provider id such as \`"blitzapi"\`), or the whole request is refused. The source lands twice in MailBridge: as the **Email Source** column (which promoting the row copies into the contact's custom variables, so bounces and replies can later be measured per provider) and as the provenance of the Email cell (\`cells.email.provider\`).
+
+Requires \`MAILBRIDGE_API_KEY\` (and optionally \`MAILBRIDGE_API_URL\`) on the server; without it these endpoints answer \`503\`.
+
+<a id="tables-post"></a>
+### \`POST /tables\` — Create a list
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| \`mailbridge_client\` | string | **Yes** | MailBridge client UUID, or its exact name. Ambiguous or unknown → \`400\`. |
+| \`campaign\` | string | **Yes** | Campaign code, e.g. \`CK001\`. |
+| \`niche\` | string | **Yes** | Short niche, e.g. \`autotransporte MX\`. |
+| \`kinds\` | string[] | No | \`["companies","people"]\` (default) or a subset. |
+| \`filters\` | object | No | The recipe/provider filters used to build the list. Stored here and in the table's \`sourceConfig\`. |
+| \`source\` | string | No | Where the rows come from, e.g. \`blitzapi\`. |
+
+Tables are named \`<campaign> — Empresas <niche>\` and \`<campaign> — Personas <niche>\`; if the client already has either name, both get the same version suffix (\` v2\`, \` v3\`…). No source or date in the name.
+
+**Response — \`201\`**:
+\`\`\`json
+{ "id": "573e…", "mailbridge_client": { "id": "29d1…", "name": "CID Kapital" },
+  "tables": { "companies": { "table_id": "3d53…", "name": "CK001 — Empresas autotransporte MX" },
+              "people":    { "table_id": "34c9…", "name": "CK001 — Personas autotransporte MX" } },
+  "status": "ready", "rows": "/tables/573e…/rows" }
+\`\`\`
+**Errors**: \`400\` missing fields / unknown client; \`502\` MailBridge failed; \`503\` not configured.
+
+<a id="tables-rows-post"></a>
+### \`POST /tables/:id/rows\` — Send rows
+
+**Body**: \`{ "kind": "people" | "companies", "rows": [ {...}, ... ] }\` — 1 to 5,000 rows per call (15 MB). Answers \`202\` right away; MailBridge receives them in batches of 500.
+
+Known fields are mapped to the headers MailBridge's promote already understands; any other field passes through under its own name.
+
+- **people**: \`first_name, last_name, full_name, job_title, job_start_date, company, domain, company_linkedin_url, linkedin_url, city, state, country, connections, email, email_source, email_status, email_found, domain_match, discard_reason, other_emails, industry, company_size, employees_on_linkedin, company_state, company_description\`
+- **companies**: \`company, domain, website, linkedin_url, industry, company_size, employees_on_linkedin, followers, founded_year, company_type, state, city, country, description, specialties, contacts_found, contacts_with_email\`
+
+Row identity (\`ref\`): an explicit \`ref\` if sent, else the LinkedIn URL, else the email (people) or domain (companies), else a hash of the row. Send the same row again to update it.
+
+**Validation is all-or-nothing**: one bad row (e.g. an email without \`email_source\`) rejects the request with \`400\` and \`accepted: 0\`.
+
+**Response — \`202\`**: \`{ "accepted": 253, "with_email": 53, "batches": 1, "status": "/tables/573e…" }\`
+
+<a id="tables-get"></a>
+### \`GET /tables/:id\` — Sync status
+
+\`status\`: \`ready\` (no rows yet) · \`syncing\` · \`synced\` · \`failed\` (some batch was refused or ran out of retries; see \`errors\`). Per kind: \`rows_received, rows_sent, rows_pending, rows_failed, inserted, updated, batches\`. Add \`?live=1\` to also read \`mailbridge_row_count\` from MailBridge — the check that what was sent actually landed.
+
+Retries: MailBridge down, \`429\` or \`5xx\` → retried with backoff (5 s … 20 min, 8 attempts). Any other \`4xx\` fails the batch at once. A deploy mid-send is picked up on boot.
+
+<a id="tables-retry-post"></a>
+### \`POST /tables/:id/retry\` — Requeue failed batches
+
+\`{ "requeued_batches": 2 }\`
 
 ---
 
