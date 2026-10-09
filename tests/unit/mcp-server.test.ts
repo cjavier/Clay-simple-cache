@@ -66,7 +66,7 @@ describe("MCP server (POST /mcp, GET /llms.txt)", () => {
     expect(typeof res.body.result.serverInfo.version).toBe("string");
   });
 
-  it("tools/list returns all 18 registered tools", async () => {
+  it("tools/list returns all 17 registered tools", async () => {
     const res = await request(app)
       .post("/mcp")
       .set("Authorization", `Bearer ${API_KEY}`)
@@ -75,7 +75,7 @@ describe("MCP server (POST /mcp, GET /llms.txt)", () => {
 
     expect(res.status).toBe(200);
     const tools = res.body.result.tools;
-    expect(tools).toHaveLength(18);
+    expect(tools).toHaveLength(17);
 
     const names = tools.map((t: any) => t.name).sort();
     expect(names).toEqual(
@@ -94,7 +94,6 @@ describe("MCP server (POST /mcp, GET /llms.txt)", () => {
         "get_profile",
         "get_stats",
         "list_clients",
-        "retry_pending_emails",
         "upsert_company",
         "upsert_profile",
         "verify_email",

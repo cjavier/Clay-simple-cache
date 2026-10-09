@@ -1,86 +1,49 @@
-import type { CascadeResult } from "./cascade";
-import type { Qualification } from "./verify";
+import type { CacheHit } from "./cache";
+import { decide, EMPTY_FACTS, reusableVerification } from "./facts";
 
 /**
- * What the cascade puts in a people row for MailBridge (canonical names; see
- * table-rows.ts for the headers). An accepted address goes in `email` with
- * its source and full verification; a discarded one, or one awaiting a
- * conclusive validation, only in `email_found`, with the reason in
- * `discard_reason` — as the build always did for junk.
+ * What the list build puts in a people row about the email (canonical names;
+ * see table-rows.ts for the headers). The build only reads the cache and asks
+ * Blitz (free); everything paid happens in MailBridge's columns afterwards:
+ *
+ * - cache hit with a conclusive verdict of ≤30 days that the moderate policy
+ *   accepts → `email`, with its ORIGINAL source and verification;
+ * - cache hit without one → only `email_found`, status `pendiente`
+ *   (`sin_verificar`): MailBridge's "Cache (Clay)" column finds it for free and
+ *   "Verificación" validates it;
+ * - Blitz hit → `email` (Blitz verifies; legacy "valido"), as always;
+ * - nothing → `no_encontrado`: MailBridge's Prospeo / Findymail columns search.
  */
+export type BuildEmail =
+  | { kind: "cache"; hit: CacheHit }
+  | { kind: "blitz"; email: string; all_emails: string[] }
+  | { kind: "none" }
+  | { kind: "error"; error: string };
 
-/**
- * Who verified a found address, as a row's `email_verification`. Blitz rows
- * without a validation keep today's shape (none: their "valido" is the
- * `valid` verdict); any other source without a verdict says `unknown`.
- */
-export function rowVerification(r: Extract<CascadeResult, { found: true }>): Record<string, unknown> | null {
-  const v = r.email_verification as Record<string, unknown> | null;
-  if (v && typeof v === "object" && v.verdict) {
-    return {
-      provider: v.provider ?? null,
-      verdict: v.verdict,
-      ...(v.checked_at ? { checked_at: v.checked_at } : {}),
-      ...(typeof v.confidence === "number" ? { confidence: v.confidence } : {}),
-    };
-  }
-  return r.email_source === "blitzapi" ? null : { provider: null, verdict: "unknown" };
+export function cacheHitAccepted(hit: CacheHit, now = new Date()): boolean {
+  const v = reusableVerification(hit.email_verification, now);
+  return Boolean(v && decide("moderate", v.verdict, EMPTY_FACTS).decision === "accept");
 }
 
-/** Server facts and evidence as flat row fields. */
-export function qualificationFields(q: Qualification | undefined): Record<string, unknown> {
-  if (!q) return {};
+/** Row fields for a cache hit (Blitz and misses go through personRow as before). */
+export function cacheRowFields(hit: CacheHit, now = new Date()): Record<string, unknown> {
+  const accepted = cacheHitAccepted(hit, now);
+  const v = hit.email_verification as Record<string, unknown> | null;
   return {
-    email_validator_response: q.validator_response == null ? undefined : typeof q.validator_response === "string" ? q.validator_response : JSON.stringify(q.validator_response),
-    mx_provider: q.facts.mx_provider ?? undefined,
-    mail_gateway: q.facts.mail_gateway ?? undefined,
-    domain_catch_all: q.facts.domain_catch_all === null ? undefined : q.facts.domain_catch_all ? "si" : "no",
-    email_evidence: q.evidence,
-    expected_bounce: q.expected_bounce,
-    send_recommendation: q.send_recommendation,
-    email_policy: `${q.policy}:${q.decision}`,
+    ...(accepted ? { email: hit.email } : {}),
+    email_found: hit.email,
+    email_source: hit.email_source || "clay_cache",
+    email_status: accepted ? "valido" : "pendiente",
+    ...(accepted ? {} : { discard_reason: "sin_verificar" }),
+    ...(v && v.verdict ? { email_verification: { provider: v.provider ?? null, verdict: v.verdict, ...(v.checked_at ? { checked_at: v.checked_at } : {}) } } : {}),
   };
 }
 
-export function cascadeRowFields(r: CascadeResult): Record<string, unknown> {
-  if (r.found) {
-    const v = rowVerification(r);
-    return {
-      email: r.email,
-      email_source: r.email_source,
-      email_status: "valido",
-      email_found: r.email,
-      ...(v ? { email_verification: v } : {}),
-      ...qualificationFields(r.qualification),
-    };
-  }
-  const pendingReason = r.pending.map((x) => `${x.provider}:${x.reason}`).join(";");
-  if (r.candidate) {
-    const q = r.candidate.qualification;
-    const awaiting = q.decision === "revalidate";
-    return {
-      email_found: r.candidate.email,
-      email_source: r.candidate.email_source,
-      email_status: awaiting ? "pendiente" : "descartado",
-      discard_reason: [q.reason, awaiting ? "" : pendingReason].filter(Boolean).join(";"),
-      // Flat: the row carries no `email`, so the verdict travels as plain columns.
-      email_verifier: q.verification.provider ?? undefined,
-      email_verdict: q.verification.verdict,
-      email_checked_at: q.verification.checked_at,
-      email_confidence: q.verification.confidence ?? undefined,
-      ...qualificationFields(q),
-    };
-  }
-  if (r.pending.length) return { email_status: "pendiente", discard_reason: pendingReason };
-  return { email_status: "no_encontrado" };
-}
-
-/** Apply the cascade's fields to a people row (drops empties; recomputes domain_match). */
-export function applyCascade(row: Record<string, unknown>, r: CascadeResult): Record<string, unknown> {
-  for (const k of ["email", "email_source", "email_status", "email_found", "discard_reason", "domain_match", "other_emails"]) delete row[k];
-  for (const [k, v] of Object.entries(cascadeRowFields(r))) if (v !== undefined && v !== null && v !== "") row[k] = v;
-  const found = String(row.email_found || "");
+/** Apply a cache hit to a people row (drops the empty email fields personRow left). */
+export function applyCacheHit(row: Record<string, unknown>, hit: CacheHit, now = new Date()): Record<string, unknown> {
+  for (const k of ["email", "email_source", "email_status", "email_found", "discard_reason", "domain_match", "other_emails", "email_verification"]) delete row[k];
+  Object.assign(row, cacheRowFields(hit, now));
   const companyDomain = String(row.domain || "").toLowerCase();
-  if (found.includes("@")) row.domain_match = companyDomain && found.split("@")[1].toLowerCase().endsWith(companyDomain) ? "si" : "no";
+  row.domain_match = companyDomain && hit.email.split("@")[1].toLowerCase().endsWith(companyDomain) ? "si" : "no";
   return row;
 }

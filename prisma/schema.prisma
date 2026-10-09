@@ -372,7 +372,10 @@ model EmailProvenance {
   @@map("email_provenance")
 }
 
-// ─── Email cascade (Blitz → Prospeo → Findymail) ───────────
+// ─── Email cascade (Blitz → Prospeo → Findymail) — RETIRED 2026-10-09 ───
+// Nothing writes these two tables any more: the paid search and verification
+// of emails moved to MailBridge's table columns (its spec 109). Kept, with
+// their history, on purpose: do not drop them in a migration.
 
 /// One person × one paid email finder: what it answered, or why it couldn't.
 /// "No encontrado" (`not_found`: the provider looked and has nothing) is not

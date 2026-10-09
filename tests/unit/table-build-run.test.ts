@@ -46,20 +46,19 @@ vi.mock("../../src/services/table-job.service", () => ({
   tableJobService: { enqueue: vi.fn(async (_id: string, kind: string, rows: unknown[]) => { enqueued.push({ kind, n: rows.length }); return []; }) },
 }));
 
-import { run, buildSummary } from "../../src/services/table-build.service";
-import { blitzProvider, CascadeProvider } from "../../src/services/email-cascade/providers";
-import type { CascadeDeps } from "../../src/services/email-cascade/cascade";
+import { run, buildSummary, freeEmail, BuildEmailDeps } from "../../src/services/table-build.service";
+import { Blitz } from "../../src/services/blitz.client";
+import type { CacheHit } from "../../src/services/email-cascade/cache";
 
-/** Cascade with no cache hits and in-memory bookkeeping; Blitz is the mock above. */
-function deps(extra: CascadeProvider[] = []): CascadeDeps & { rows: any[] } {
-  const rows: any[] = [];
+/** cache → Blitz with the mock above; nothing paid exists any more. */
+function deps(hits: Record<string, CacheHit> = {}): BuildEmailDeps & { saved: string[] } {
+  const saved: string[] = [];
+  const bz = new Blitz() as any;
   return {
-    rows,
-    lookup: async () => null,
-    save: async () => undefined,
-    attempts: { prior: async () => [], record: async (k, _p, ctx, w) => { rows.push({ k, ...ctx, ...w }); }, closePending: async () => 0 },
-    breaker: { isExhausted: async () => null, trip: async () => true },
-    providers: [blitzProvider(), ...extra],
+    saved,
+    lookup: async (p) => hits[String(p.linkedin_url)] ?? null,
+    blitz: (li) => bz.findEmail(li),
+    save: async (_p, found) => { saved.push(found.email); },
   };
 }
 let d: ReturnType<typeof deps>;
@@ -120,34 +119,39 @@ describe("background Blitz build", () => {
   });
 });
 
-describe("background build with the email cascade", () => {
-  const prospeo = (calls: { n: number }): CascadeProvider => ({
-    id: "prospeo", label: "Prospeo", configured: () => true, costUsd: () => 0.05,
-    async find(p) { calls.n++; return { kind: "found", email: `${String(p.linkedin_url).split("/").pop()}@prospeo.mx`, verification: { provider: "prospeo", verdict: "valid" } }; },
+describe("emails in the build: only cache and Blitz (free)", () => {
+  const hit = (email: string, verification: Record<string, unknown> | null): CacheHit => ({
+    found: true, email, email_source: "icypeas", email_verification: verification, email_found_via: null, profile_id: "p", matched_by: "linkedin",
   });
 
-  it("Prospeo picks up who Blitz missed, and the rows say so", async () => {
-    const calls = { n: 0 };
-    d = deps([prospeo(calls)]);
+  it("Blitz hits go to Email and into the cache; misses are left for MailBridge's columns", async () => {
     await runJob("j1");
-    expect(job.build_status).toBe("done");
-    expect(calls.n).toBe(75); // only the 75 Blitz missed
-    expect(job.build_state).toMatchObject({ emails_valid: 150, emails_by_source: { blitzapi: 75, prospeo: 75 }, email_spend_usd: 3.75 });
-  });
-
-  it("stops paying at email_budget_usd; the rest are pending (presupuesto), reported in the summary", async () => {
-    const calls = { n: 0 };
-    d = deps([prospeo(calls)]);
-    job.build.email_budget_usd = 1;
-    await runJob("j1");
-    expect(calls.n).toBe(20); // $1 / $0.05
-    expect(job.build_state.email_spend_usd).toBeCloseTo(1);
-    expect(job.build_state).toMatchObject({ emails_valid: 95, emails_pending: 55, emails_pending_by_reason: { presupuesto: 55 }, budget_exhausted: true });
-    const pending = d.rows.filter((r) => r.status === "pending");
-    expect(pending.every((r) => r.provider === "prospeo" && r.reason === "presupuesto" && r.called === false && r.job_id === "j1")).toBe(true);
+    expect(job.build_state).toMatchObject({ emails_valid: 75, emails_by_source: { blitzapi: 75 }, emails_not_found: 75 });
+    expect(d.saved).toHaveLength(75);
     const sum = buildSummary(job.build_status, job.build_state, job.build, null)!;
-    expect(sum.emails).toMatchObject({ budget_usd: 1, budget_exhausted: true, pending: { persons: 55, by_reason: { presupuesto: 55 } } });
-    const people = enqueued.filter((e) => e.kind === "people").reduce((s, e) => s + e.n, 0);
-    expect(people).toBe(150); // pending people still get their row, without an email
+    expect(sum.emails).toMatchObject({ from_cache: 0, not_found: 75 });
+    expect(sum.emails).not.toHaveProperty("budget_usd");
+  });
+
+  it("a cache hit with a recent conclusive verdict goes to Email with its original source; without one it waits for Verificación", async () => {
+    const recent = new Date(Date.now() - 86_400_000).toISOString();
+    const ok = await freeEmail({ linkedin_url: "li-a" }, deps({ "li-a": hit("ana@acme.mx", { provider: "debounce", verdict: "valid", checked_at: recent }) }));
+    expect(ok).toMatchObject({ kind: "cache" });
+    const { applyCacheHit } = await import("../../src/services/email-cascade/rows");
+    const accepted = applyCacheHit({ domain: "acme.mx" }, (ok as any).hit);
+    expect(accepted).toMatchObject({ email: "ana@acme.mx", email_source: "icypeas", email_status: "valido", domain_match: "si" });
+    const old = applyCacheHit({ domain: "acme.mx" }, hit("ana@acme.mx", { provider: "debounce", verdict: "valid", checked_at: "2025-01-01T00:00:00Z" }));
+    expect(old).toMatchObject({ email_found: "ana@acme.mx", email_status: "pendiente", discard_reason: "sin_verificar" });
+    expect(old).not.toHaveProperty("email");
+  });
+
+  it("junk or personal addresses from Blitz are not used", async () => {
+    const r = await freeEmail({ linkedin_url: "li-x" }, { lookup: async () => null, blitz: async () => ({ found: true, email: "x@gmail.com" }), save: async () => undefined });
+    expect(r).toEqual({ kind: "none" });
+  });
+
+  it("the old paid knobs are rejected, not silently ignored", async () => {
+    const { parseBuild } = await import("../../src/controllers/tables.controller");
+    expect(parseBuild({ company: { x: 1 }, email_budget_usd: 5 })).toMatch(/removed/);
   });
 });

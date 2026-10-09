@@ -4,9 +4,14 @@ import { normalizeName } from "../../email-finder/permutator";
 import { namePartsFromSlug } from "../../email-finder/identity";
 import { getOutcomesForEmails } from "../../email-finder/outcomes";
 import { ingestEntry, IngestProvenance, normalizeProvider, normalizeVerdict, ProvenanceEntry } from "../../email-finder/provenance";
-import type { Qualification } from "./verify";
+import type { Qualification } from "./facts";
 import { recordProvenance } from "../provenance.service";
-import { bareDomain, CascadePerson, EmailVerification } from "./providers";
+import { bareDomain, CascadePerson } from "./blitz";
+
+export interface EmailVerification {
+  provider: string | null;
+  verdict: "valid" | "invalid" | "catch_all" | "unknown" | "risky";
+}
 
 /**
  * The cache of profiles, read before anyone pays and written after anyone finds.
@@ -143,7 +148,7 @@ export async function lookupCachedEmail(p: CascadePerson): Promise<CacheHit | nu
 
 export interface FoundEmail {
   email: string;
-  /** Provider that found it (blitzapi | prospeo | findymail). */
+  /** Provider that found it (blitzapi, or what a MailBridge column reported: prospeo, findymail…). */
   source: string;
   verification: EmailVerification | null;
 }
@@ -163,11 +168,12 @@ export function qualificationData(q: Qualification) {
     email_evidence: q.evidence,
     expected_bounce: q.expected_bounce,
     send_recommendation: q.send_recommendation,
-    email_policy: { policy: q.policy, decision: q.decision, reason: q.reason },
+    ...(q.policy ? { email_policy: { policy: q.policy, decision: q.decision ?? null, reason: q.reason ?? null } } : {}),
   };
 }
 
-export async function saveFoundEmail(p: CascadePerson, found: FoundEmail, q?: Qualification): Promise<void> {
+export async function saveFoundEmail(p: CascadePerson, found: FoundEmail, q?: Qualification, opts: { foundVia?: string } = {}): Promise<void> {
+  const via = opts.foundVia || "clay_cache_cascade";
   try {
     const email = normalizeEmail(found.email);
     const slug = p.linkedin_url ? normalizeLinkedIn(p.linkedin_url) : null;
@@ -202,6 +208,13 @@ export async function saveFoundEmail(p: CascadePerson, found: FoundEmail, q?: Qu
         if (existing) {
           const updates: Record<string, unknown> = {};
           const old = existing.email ? existing.email.toLowerCase() : null;
+          if (old !== email && old && verdict === "invalid") {
+            // An invalid address never replaces the one the person already has: it is
+            // remembered (so nobody treats it as new) and only the evidence travels.
+            const rejected = [...new Set([...(((existing.data as any)?.rejected_emails as string[]) || []), email])];
+            await prisma.profile.update({ where: { id: existing.id }, data: { data: { ...(existing.data as object), rejected_emails: rejected } } });
+            break;
+          }
           if (old !== email) {
             // Matched by LinkedIn and holding another address: that one was not usable
             // (bounced / invalid), or the cache would have answered and nobody would have paid.
@@ -212,10 +225,10 @@ export async function saveFoundEmail(p: CascadePerson, found: FoundEmail, q?: Qu
           if (p.linkedin_url && !existing.linkedin_url) updates.linkedin_url = p.linkedin_url;
           // Keep who found it first (e.g. Clay's function) when the address is the same.
           const keepVia = old === email && (existing.data as any)?.email_found_via;
-          updates.data = { ...(existing.data as object), ...data, email_found_via: keepVia || "clay_cache_cascade" };
+          updates.data = { ...(existing.data as object), ...data, email_found_via: keepVia || via };
           await prisma.profile.update({ where: { id: existing.id }, data: updates });
         } else {
-          await prisma.profile.create({ data: { email, linkedin_slug: slug, linkedin_url: p.linkedin_url || null, data: { ...data, email_found_via: "clay_cache_cascade" } as object } });
+          await prisma.profile.create({ data: { email, linkedin_slug: slug, linkedin_url: p.linkedin_url || null, data: { ...data, email_found_via: via } as object } });
         }
         break;
       } catch (e: any) {

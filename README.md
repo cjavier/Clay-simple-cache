@@ -184,9 +184,10 @@ See the full, always-current API reference at `GET /docs/api` (e.g. `http://loca
   - `POST /tables`: Create a list's tables (companies + people) in MailBridge for a client; returns a job id and the MailBridge table ids.
   - `POST /tables/:id/rows`: Queue up to 5,000 rows; they reach MailBridge in the background, upserted by a stable `ref`. **A people row with an email must carry `email_source`** (e.g. `blitzapi`), stored as the "Email Source" column and as the Email cell's provider.
   - `GET /tables/:id`: Sync status per table (`?live=1` also reads MailBridge's row count). `POST /tables/:id/retry` requeues refused batches.
-  - `POST /tables/:id/emails/retry` · `POST /emails/retry`: retry the people the email cascade left **pending** (see [Email cascade](#email-cascade)).
-  - `POST /emails/lookup`: free cache read used by MailBridge's `clay_cache` provider.
-  - The people table also gets an **"Email (cascada)" enrichment column**: Prospeo → Findymail → Clay function "Get Email (External)" (`CLAY_EMAIL_ROUTINE_ID`, default `function:t_0tmngkoVgNYaHjSNmeY`), only on rows without an email. It never runs by itself (each step costs credits): run it from MailBridge on the rows you choose. The cell keeps the provider that found the email. `email_waterfall: false` skips it.
+  - `POST /emails/lookup`: free cache read used by MailBridge's "Cache (Clay)" column (`clay_cache` provider).
+  - `POST /emails/facts`: free server facts for an address (MailBridge's "Verificación" column).
+  - `POST /emails/results`: MailBridge sends back every email its columns found and every verdict (see [Emails](#emails-search-and-verification-live-in-mailbridge)).
+  - The people table also gets **MailBridge's email-cascade columns**, one per step: Cache (Clay) → Prospeo → Findymail → Clay Function (manual-only; `CLAY_EMAIL_ROUTINE_ID`, default `function:t_0tmngkoVgNYaHjSNmeY`) → Verificación → Email. MailBridge owns the definition (`POST /tables/:id/columns/presets/email-cascade`); this API only asks for it. They never run by themselves. `email_waterfall: false` skips them.
   - Needs `MAILBRIDGE_API_KEY` (+ optional `MAILBRIDGE_API_URL`).
 
 - **Misc**
@@ -266,38 +267,30 @@ curl -X POST http://localhost:3000/dnc/check \
   -d '{"handle": "acme", "email": "juan@empresa.com"}'
 ```
 
-## Email cascade
+## Emails: search and verification live in MailBridge
 
-Every person of a list build (`POST /tables` with `build`) goes through
-`findEmailCascade(person)` (`src/services/email-cascade/`):
+Since 2026-10-09 (Javier) the **paid** search and verification of emails for
+lists run in MailBridge's people tables, where the cost is recorded per
+client, month and provider (MailBridge spec 109). This API no longer pays
+Prospeo, Findymail or any validator for a list, and it no longer retries
+anyone: no `email_attempts` processing, no breaker, no hourly reprocessing,
+no `/emails/retry`, no `retry_pending_emails`. (The `email_attempts` and
+`email_provider_state` tables keep their history; nothing writes to them.)
 
-1. **Cache first, always.** The profiles cache by LinkedIn (normalized slug), then by name + domain. A hit is used with its **original** `email_source` (e.g. `icypeas` from Clay's function) and nobody pays. Hard-bounced or `invalid` addresses are not hits.
-2. **Finders: Blitz → Prospeo → Findymail**, in that order, stopping at the first address that passes the policy. Every find is written to the cache with its provenance and sent as evidence to MailBridge (`POST /email-evidence`, via the provenance outbox).
-3. **Validation of every address** before it goes to MailBridge: **Findymail verify** (`POST /api/verify` → `{verified, provider}`; it resolves catch-all on Google, which SMTP verifiers can't) → **DeBounce** → **EmailListVerify** as fallbacks. A cached address with a conclusive verdict by a real verifier from the last `EMAIL_REVALIDATE_DAYS` (30) is not validated again.
-4. **Acceptance policy** (below) decides `Email` vs `Email Found` + `Discard Reason`.
+**The list build (`POST /tables` with `build`) uses only what is free:**
 
-**"No encontrado" ≠ "no se pudo buscar".** Table `email_attempts` keeps one row per person × provider (× job): `found`, `not_found`, `pending` (reason `sin_creditos`, `rate_limit`, `error`, `presupuesto`, `revalidar`) or `closed` (resolved without paying: `cache`, or `encontrado` by another provider). A `not_found` is not bought again for `EMAIL_NOT_FOUND_RETRY_DAYS` (90); a provider that answered `found` is never asked again for that person; `pending` is retried.
+1. **The cache of profiles** (LinkedIn slug, then name + domain; hard-bounced, `invalid` and personal-domain addresses are not hits). A hit keeps its **original** `email_source`. If its stored verdict is conclusive, by a real verifier and ≤30 days old, and the moderate policy accepts it, it goes to `Email`; otherwise only to `Email Found` with `Email Status: pendiente`, `Discard Reason: sin_verificar` — MailBridge's "Cache (Clay)" column finds it for free and "Verificación" validates it.
+2. **Blitz** by LinkedIn (flat plan: a miss costs nothing). A hit goes to `Email` (`email_source: blitzapi`) and into the cache. Junk and personal addresses are not used.
+3. Everyone else: `Email Status: no_encontrado`, for MailBridge's columns. `GET /tables/:id` → `build.emails` reports `from_cache`, `cache_unverified`, `by_source`, `not_found`. `build.email_budget_usd` / `build.email_policy` were removed (400 if sent).
 
-**Budget per job:** `build.email_budget_usd` (default `EMAIL_BUDGET_DEFAULT_USD` = 20). Calls are reserved before they're made, so parallel calls can't overshoot. When it runs out, paid finders stop; the rest stay `pending` (`presupuesto`), reported in `GET /tables/:id` → `build.emails` (`spent_usd`, `budget_exhausted`, `by_source`, `from_cache`, `pending`, `pending_now`, `discarded`, `awaiting_revalidation`). Unit costs (USD, configurable):
+**MailBridge's email columns** (one per step, like Clay; each runs only if there is still no email): **Cache (Clay)** (`POST /emails/lookup`, free) → **Prospeo** → **Findymail** → **Clay Function** (manual-only) → **Verificación** (Findymail verify; DeBounce when Findymail has no credits; reuses a cache verdict of ≤30 days; asks `POST /emails/facts`) → **Email** (acceptance policy, `moderate` by default, set per column). A provider without credits leaves the cell **pending** with its reason, not "not found". The policy is the one below (`decide()` in `src/services/email-cascade/facts.ts` mirrors MailBridge's `decideEmail()`); **Mimecast no longer discards** (it stays in `Mail Gateway` / `Send Recommendation`).
 
-| Provider | Cost | Env | Note |
-|---|---|---|---|
-| Blitz | 0 | `EMAIL_COST_BLITZAPI_USD` | flat plan; a miss costs nothing |
-| Prospeo | 0.05 per match | `EMAIL_COST_PROSPEO_USD` | 1 credit per verified match; `NO_MATCH` free |
-| Findymail (finder) | 0.05 per match | `EMAIL_COST_FINDYMAIL_USD` | ~$49 / 1,000; charges only when found |
-| Findymail verify | 0.005 per verdict | `EMAIL_COST_FINDYMAIL_VERIFY_USD` | separate verifier credits |
-| DeBounce | 0.0015 per verdict | `EMAIL_COST_DEBOUNCE_USD` | |
-| EmailListVerify | 0.0004 per verdict | `EMAIL_COST_EMAILLISTVERIFY_USD` | |
-
-**Circuit breaker** (table `email_provider_state`, survives deploys): the first 402 / "insufficient credits" (or 401) of a finder or validator opens it; the provider is no longer called, people go on to the next one and stay `pending` for it. One Slack per event ("Prospeo sin créditos; N personas pendientes (CK001…)"; for validators: "Validación: Findymail sin créditos → se cambia a DeBounce").
-
-**Hourly check** (`EMAIL_CASCADE_HOURLY=true`, in-process, first run 2 min after boot): reads each provider's free balance endpoint (Prospeo `/account-information`, Findymail `/api/credits` — `credits` and `verifier_credits` —, DeBounce `/v1/balance`, ELV `/api/credits`). Breaker open + balance > 0 → reactivate, Slack, retry its pending people (cache first: what Clay's function already found is closed for free and resent). Balance 0 → open the breaker before anyone gets a 402. Balance under `EMAIL_LOW_CREDITS_<PROVIDER>` (default 500) → one Slack per provider per day. Also retries `rate_limit`/`error` pendings older than an hour (`EMAIL_MAX_TRIES` = 5) and `revalidar` once a day (3 tries). `presupuesto` is only retried by hand.
-
-**Manual retry:** `POST /tables/:id/emails/retry` or `POST /emails/retry` `{since?, provider?, reason?, budget_usd?, policy?, limit?}` → `202 {retrying, pending_rows}`, processed in the background; MCP tool `retry_pending_emails`. Found addresses go back to the same MailBridge row (same `ref`, MailBridge upserts).
+**What comes back here:** every address a MailBridge column found and every verdict, `POST /emails/results`:
+`{linkedin_url?, first_name?, last_name?, full_name?, company_domain?, company_name?, email, email_source, verification?: {provider, verdict, checked_at, confidence}, validator_response?, facts?, evidence?, expected_bounce?, send_recommendation?, policy?, decision?, reason?}` → saved to the profile with its provenance (`email_found_via: mailbridge_table`), and the provenance outbox sends the evidence to MailBridge's `POST /email-evidence`. An `invalid` verdict never replaces the address a person already has (it is kept in `rejected_emails`). Bounces keep flowing MailBridge → here through `POST /webhooks/mailbridge` (`email_outcomes`, spec 103).
 
 ### Acceptance policy
 
-`EMAIL_ACCEPT_POLICY` (default `moderate`), overridable per job with `build.email_policy` (or `policy` on a retry). Audit 2026-10-08 (`Clientes-Improvitz/infraestructura-outbound/rebotes-y-finder.md`): valid by DeBounce/ELV bounces 2.9–5.5%; catch_all by pattern 26.8%; catch_all on Google Workspace 52%; Mimecast 63%, Barracuda 32%; domains where everything bounced = 45% of bounces; pattern with ≥2 deliveries and no bounce 6.4%, a pattern that bounced 50%.
+Audit 2026-10-08 (`Clientes-Improvitz/infraestructura-outbound/rebotes-y-finder.md`): valid by DeBounce/ELV bounces 2.9–5.5%; catch_all by pattern 26.8%; catch_all on Google Workspace 52%; Mimecast 63%, Barracuda 32%; domains where everything bounced = 45% of bounces; pattern with ≥2 deliveries and no bounce 6.4%, a pattern that bounced 50%.
 
 | Verdict / evidence | strict | moderate (default) | permissive |
 |---|---|---|---|
@@ -306,17 +299,15 @@ Every person of a list build (`POST /tables` with `build`) goes through
 | `valid` | pass (discard if negative evidence) | pass | pass |
 | `catch_all` + address delivered or pattern confirmed (≥2 deliveries, 0 bounces) | pass | pass | pass |
 | `catch_all`, no evidence either way | discard (`catch_all_sin_evidencia`) | **pass** | pass |
-| `catch_all` + domain with only bounces / this pattern bounced / Mimecast | discard | discard (`catch_all_dominio_solo_rebotes` · `catch_all_patron_reboto` · `catch_all_gateway_mimecast`) | pass |
+| `catch_all` + domain with only bounces / this pattern bounced | discard | discard (`catch_all_dominio_solo_rebotes` · `catch_all_patron_reboto`) | pass |
 | `unknown` | revalidate | revalidate | pass |
 | `risky` (disposable, role) | discard | revalidate | pass |
 
-"Revalidate" = not in `Email`; the address stays in `Email Found` with `Email Status: pendiente` and the person is pending `verify`/`revalidar`. Discarded addresses go to `Email Found` with `Email Status: descartado` and the reason in `Discard Reason`. The decision lives in `decide()` (`src/services/email-cascade/verify.ts`); adjust it there.
-
-**What reaches MailBridge per people row:** `Email`, `Email Source` (finder), `Email Status`, `Email Found`, `Discard Reason`, `Email Verifier`, `Email Verdict`, `Email Checked At`, `Email Confidence`, `Email Validator Response` (raw JSON), `MX Provider` (google_workspace / office365 / other), `Mail Gateway` (mimecast / barracuda / sophos), `Domain Catch-All` (si/no), `Email Evidence` (tier), `Expected Bounce`, `Send Recommendation` (send / risky / do_not_send), `Email Policy` (`<policy>:<decision>`). The Email cell's provider is the finder and the Email Verdict cell's provider is the validator. The same evidence (finder, verifier, verdict, `send_recommendation`, `evidence_tier`, `expected_bounce`, `mail_gateway`, `mx_provider`, `pattern`) is pushed to MailBridge's `POST /email-evidence`.
+Personal mailboxes (gmail, hotmail, gmx…) and generic inboxes (info@, ventas@, contacto@, gerencia@…) are discarded before the policy.
 
 **`POST /emails/lookup`** (contract for MailBridge's `clay_cache` provider — keep it stable): `{linkedin_url?, first_name?, last_name?, full_name?, company_domain?}` (LinkedIn, or a name with `company_domain`) → `200 {found, email, email_source, email_verification, email_found_via}`; `found:false` with nulls when there's nothing. Free, never calls a provider, own rate limit (`LOOKUP_RATE_LIMIT_PER_MIN`, 1200).
 
-**MailBridge column `email_cascada`** (added to every people table): `clay_cache` (`lookup_email`) → Clay function "Get Email (External)". Prospeo and Findymail left the column: they run in this API's build now. The Clay function POSTs what it finds to `/profiles` (with `linkedin_url`), so the next lookup is free.
+**`POST /emails/facts`** (contract for MailBridge's "Verificación"): `{email, first_name?, last_name?, linkedin_url?}` → `{mx_provider, mail_gateway, domain_catch_all, bad_domain, pattern, pattern_tier, address_status}`. Free (DNS + this cache's outcomes).
 
 ## Email Finder — Cost per Lookup
 

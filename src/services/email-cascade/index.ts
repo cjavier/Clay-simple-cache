@@ -1,14 +1,11 @@
 /**
- * Email cascade: cache first, then Blitz → Prospeo → Findymail, with a spend
- * cap per job, a persistent circuit breaker per provider, pending people kept
- * apart from real misses, and hourly reactivation. See each module.
+ * Emails in the cache: lookup (free), what we know about a recipient's server
+ * (free) and saving what MailBridge's table columns found and verified.
+ * The paid search and validation run in MailBridge (its spec 109).
  */
-export { findEmailCascade, Budget } from "./cascade";
-export type { CascadeResult, CascadeDeps, PendingReason, AttemptContext } from "./cascade";
-export { lookupCachedEmail, saveFoundEmail, personKey } from "./cache";
+export { lookupCachedEmail, saveFoundEmail, personKey, isPersonalEmail } from "./cache";
 export type { CacheHit } from "./cache";
-export { CASCADE_PROVIDERS, unitCost } from "./providers";
-export type { CascadePerson, CascadeProviderId } from "./providers";
-export { defaultDeps, defaultBudgetUsd, queueRetry, jobPendingSummary, pendingGroups, processGroups } from "./pending";
-export type { RetryFilter } from "./pending";
-export { startEmailCascadeSchedule, hourlyTick } from "./schedule";
+export { serverFacts, evidenceFor, decide, POLICIES, EMPTY_FACTS, reusableVerification } from "./facts";
+export type { ServerFacts, Policy, Qualification } from "./facts";
+export { blitzClient, usable } from "./blitz";
+export { applyCacheHit, cacheHitAccepted } from "./rows";

@@ -106,6 +106,15 @@ export const mailbridge = {
     return { id: c.id, key: c.key };
   },
 
+  /**
+   * The email-cascade column set of a people table (MailBridge spec 109):
+   * Cache (Clay) → Prospeo → Findymail → Clay Function (manual) → Verificación → Email.
+   * MailBridge owns the definition; this only asks for it (idempotent).
+   */
+  async addEmailCascadeColumns(tableId: string, options: { policy?: string; clayRoutineId?: string; includeClay?: boolean } = {}): Promise<{ columns: Array<{ key: string; id: string; action: string }>; order: string[] }> {
+    return call<any>("POST", `/tables/${tableId}/columns/presets/email-cascade`, options);
+  },
+
   /** Upsert by `ref`: resending a batch updates the same rows instead of duplicating them. */
   async upsertRows(tableId: string, rows: UpsertRow[]): Promise<{ inserted: number; updated: number; rowCount: number }> {
     const r = await call<any>("POST", `/tables/${tableId}/rows`, { rows }, 120_000);

@@ -2,11 +2,9 @@ import prisma from "../db/prisma";
 import { companyRow, currentExperience, normLi, personRow } from "./table-build";
 import { tableJobService } from "./table-job.service";
 import { rowRef, toUpsertRow } from "./table-rows";
-import { Budget, CascadeDeps, CascadeResult, findEmailCascade } from "./email-cascade/cascade";
-import { defaultBudgetUsd, defaultDeps } from "./email-cascade/pending";
-import { applyCascade } from "./email-cascade/rows";
-import { defaultPolicy, Policy } from "./email-cascade/verify";
-import { blitzClient } from "./email-cascade/providers";
+import { CacheHit, lookupCachedEmail, saveFoundEmail } from "./email-cascade/cache";
+import { applyCacheHit, BuildEmail, cacheHitAccepted } from "./email-cascade/rows";
+import { blitzClient, CascadePerson, usable } from "./email-cascade/blitz";
 
 /**
  * The full list build, in the background: the whole TAM of a recipe, not a
@@ -22,11 +20,12 @@ import { blitzClient } from "./email-cascade/providers";
  *
  * No cap of contacts per company (Javier, 2026-10-05).
  *
- * Emails go through the cascade (src/services/email-cascade): the cache of
- * profiles first (free, keeps the original email_source), then Blitz →
- * Prospeo → Findymail, capped by `email_budget_usd` per job. People a
- * provider couldn't look up (no credits, rate limit, budget) are `pendiente`,
- * not "no encontrado", and are retried later onto the same MailBridge row.
+ * Emails: only what costs nothing. The cache of profiles first (keeps the
+ * original email_source), then Blitz (flat plan). Nothing paid runs here: the
+ * people the build leaves without an email are searched and verified by the
+ * email-cascade columns of the MailBridge table (Cache (Clay) → Prospeo →
+ * Findymail → Verificación → Email), where each provider's cost is recorded
+ * (Javier, 2026-10-09; MailBridge spec 109).
  */
 
 export interface BuildConfig {
@@ -39,10 +38,6 @@ export interface BuildConfig {
   find_emails: boolean;
   /** contacts/month × months, to judge coverage like the skill does. */
   needed?: number | null;
-  /** USD cap for paid email finders in this job (default EMAIL_BUDGET_DEFAULT_USD, 20). */
-  email_budget_usd?: number;
-  /** Acceptance policy for found addresses: strict | moderate | permissive (default EMAIL_ACCEPT_POLICY, moderate). */
-  email_policy?: Policy;
 }
 
 export interface BuildState {
@@ -55,18 +50,15 @@ export interface BuildState {
   emails_searched?: number;
   chunks?: number;
   records_used?: number;
-  /** Email cascade bookkeeping. */
-  email_spend_usd?: number;
+  /** Where the emails came from (cache keeps the original email_source). */
   emails_from_cache?: number;
   emails_by_source?: Record<string, number>;
-  /** People without an email because a provider couldn't look (not "not found"). */
-  emails_pending?: number;
-  emails_pending_by_reason?: Record<string, number>;
-  /** Found but discarded by the policy (invalid, catch-all with negative evidence…). */
-  emails_discarded?: number;
-  /** Found, awaiting a conclusive validation (unknown/risky under moderate). */
-  emails_revalidate?: number;
-  budget_exhausted?: boolean;
+  /** In the cache but without a recent verdict: left for MailBridge's Verificación column. */
+  emails_cache_unverified?: number;
+  /** Nobody free had them: left for MailBridge's Prospeo / Findymail columns. */
+  emails_not_found?: number;
+  /** Legacy fields of builds made while the cache paid for emails (kept for old jobs' summaries). */
+  email_spend_usd?: number;
   started_at?: string;
   finished_at?: string;
 }
@@ -120,7 +112,31 @@ export const tableBuildService = {
 };
 
 /** Exported for tests; production goes through tableBuildService.start(). */
-export async function run(jobId: string, deps?: CascadeDeps): Promise<void> {
+export interface BuildEmailDeps {
+  lookup(person: CascadePerson): Promise<CacheHit | null>;
+  /** Blitz by LinkedIn: free. */
+  blitz(linkedinUrl: string): Promise<{ found: boolean; email?: string | null; all_emails?: string[] } | null>;
+  save: typeof saveFoundEmail;
+}
+
+/** cache → Blitz, nothing else. Exported for tests. */
+export async function freeEmail(person: CascadePerson, deps: BuildEmailDeps): Promise<BuildEmail> {
+  try {
+    const hit = await deps.lookup(person);
+    if (hit) return { kind: "cache", hit };
+    if (!person.linkedin_url) return { kind: "none" };
+    const em = await deps.blitz(person.linkedin_url);
+    const email = em?.found ? usable(em.email) : null;
+    if (!email) return { kind: "none" };
+    // Into the cache (free), so the next lookup of this person answers.
+    await deps.save(person, { email, source: "blitzapi", verification: null });
+    return { kind: "blitz", email, all_emails: (em?.all_emails || []).filter((x): x is string => typeof x === "string") };
+  } catch (e: any) {
+    return { kind: "error", error: String(e?.message || e).slice(0, 300) };
+  }
+}
+
+export async function run(jobId: string, deps?: BuildEmailDeps): Promise<void> {
   const job = await prisma.tableJob.findUnique({ where: { id: jobId } });
   if (!job || !job.build || !["queued", "running"].includes(job.build_status || "")) return;
   const cfg = job.build as unknown as BuildConfig;
@@ -129,9 +145,7 @@ export async function run(jobId: string, deps?: CascadeDeps): Promise<void> {
 
   try {
     const bz = await blitzClient();
-    const cascade = deps ?? defaultDeps();
-    const peopleTable = ((job.tables as any)?.people?.table_id as string) || null;
-    const budget = new Budget(cfg.email_budget_usd ?? defaultBudgetUsd(), state.email_spend_usd || 0);
+    const emailDeps: BuildEmailDeps = deps ?? { lookup: lookupCachedEmail, blitz: (li) => bz.findEmail(li), save: saveFoundEmail };
     const before = bz.recordsUsed;
     const used = () => baseRecords + (bz.recordsUsed - before);
 
@@ -185,41 +199,34 @@ export async function run(jobId: string, deps?: CascadeDeps): Promise<void> {
         for (const li of [...companies.keys()]) if (!kept.has(li)) companies.delete(li);
       }
 
-      // 3. Emails: cache → Blitz → Prospeo → Findymail (misses cost nothing; finds count against the budget).
-      const results: Array<CascadeResult | { error: string } | null> = cfg.find_emails
+      // 3. Emails: cache → Blitz, both free. The rest is for MailBridge's columns.
+      const results: Array<BuildEmail | null> = cfg.find_emails
         ? await mapPool(people, EMAIL_CONCURRENCY, async ({ p, exp, companyLi }) => {
             const c = companies.get(companyLi) || {};
-            try {
-              return await findEmailCascade(
-                {
-                  linkedin_url: p.linkedin_url,
-                  first_name: p.first_name,
-                  last_name: p.last_name,
-                  full_name: p.full_name,
-                  company_domain: c.domain || exp?.company_domain,
-                  company_name: c.name || exp?.company_name,
-                },
-                cascade,
-                { budget, policy: cfg.email_policy, ctx: { job_id: jobId, mb_table_id: peopleTable, row_ref: p.linkedin_url ? rowRef("people", { linkedin_url: p.linkedin_url }) : null } }
-              );
-            } catch (e: any) {
-              return { error: e?.message || String(e) };
-            }
+            return freeEmail(
+              {
+                linkedin_url: p.linkedin_url,
+                first_name: p.first_name,
+                last_name: p.last_name,
+                full_name: p.full_name,
+                company_domain: c.domain || exp?.company_domain,
+                company_name: c.name || exp?.company_name,
+              },
+              emailDeps
+            );
           })
         : people.map(() => null);
       for (const r of results) {
-        if (!r || "error" in r) continue;
-        if (r.found) {
-          state.emails_by_source = { ...state.emails_by_source, [r.email_source]: (state.emails_by_source?.[r.email_source] || 0) + 1 };
-          if (r.from_cache) state.emails_from_cache = (state.emails_from_cache || 0) + 1;
-        } else if (r.candidate) {
-          const k = r.candidate.qualification.decision === "revalidate" ? "emails_revalidate" : "emails_discarded";
-          state[k] = (state[k] || 0) + 1;
-        } else if (r.pending.length) {
-          state.emails_pending = (state.emails_pending || 0) + 1;
-          const reasons = { ...state.emails_pending_by_reason };
-          for (const reason of new Set(r.pending.map((x) => x.reason))) reasons[reason] = (reasons[reason] || 0) + 1;
-          state.emails_pending_by_reason = reasons;
+        if (!r) continue;
+        if (r.kind === "cache") {
+          state.emails_from_cache = (state.emails_from_cache || 0) + 1;
+          if (!cacheHitAccepted(r.hit)) state.emails_cache_unverified = (state.emails_cache_unverified || 0) + 1;
+          const src = r.hit.email_source || "clay_cache";
+          state.emails_by_source = { ...state.emails_by_source, [src]: (state.emails_by_source?.[src] || 0) + 1 };
+        } else if (r.kind === "blitz") {
+          state.emails_by_source = { ...state.emails_by_source, blitzapi: (state.emails_by_source?.blitzapi || 0) + 1 };
+        } else if (r.kind === "none") {
+          state.emails_not_found = (state.emails_not_found || 0) + 1;
         }
       }
 
@@ -227,8 +234,9 @@ export async function run(jobId: string, deps?: CascadeDeps): Promise<void> {
       const perCompany = new Map<string, [number, number]>();
       const personRows = people.map(({ p, exp, companyLi }, i) => {
         const r = results[i];
-        let row = personRow(p, exp, companies.get(companyLi) || {}, r && "error" in r ? { found: false, error: r.error } : null);
-        if (r && !("error" in r)) row = applyCascade(row, r);
+        const em = !r ? null : r.kind === "error" ? { found: false, error: r.error } : r.kind === "blitz" ? { found: true, email: r.email, all_emails: r.all_emails } : r.kind === "none" ? { found: false } : null;
+        let row = personRow(p, exp, companies.get(companyLi) || {}, em);
+        if (r?.kind === "cache") row = applyCacheHit(row, r.hit);
         const s = perCompany.get(companyLi) || [0, 0];
         s[0] += 1;
         if (row.email) s[1] += 1;
@@ -253,8 +261,6 @@ export async function run(jobId: string, deps?: CascadeDeps): Promise<void> {
       state.emails_searched = (state.emails_searched || 0) + (cfg.find_emails ? people.length : 0);
       state.emails_valid = (state.emails_valid || 0) + personRows.filter((r) => r.email).length;
       state.records_used = used();
-      state.email_spend_usd = budget.spentUsd;
-      state.budget_exhausted = budget.exhausted || undefined;
       await save(jobId, state);
 
       if (cut || !cursor || page.length === 0) break;
@@ -300,16 +306,13 @@ export function buildSummary(status: string | null, state: BuildState, cfg: Buil
     emails: cfg?.find_emails === false
       ? null
       : {
-          budget_usd: cfg?.email_budget_usd ?? defaultBudgetUsd(),
-          spent_usd: state.email_spend_usd || 0,
-          budget_exhausted: Boolean(state.budget_exhausted),
+          // Free only (cache + Blitz). Paid search and verification: the MailBridge table's email columns.
           from_cache: state.emails_from_cache || 0,
+          cache_unverified: state.emails_cache_unverified || 0,
           by_source: state.emails_by_source || {},
-          // People with no email because a provider couldn't look; they are retried, unlike "no encontrado".
-          pending: { persons: state.emails_pending || 0, by_reason: state.emails_pending_by_reason || {} },
-          policy: cfg?.email_policy ?? defaultPolicy(),
-          discarded: state.emails_discarded || 0,
-          awaiting_revalidation: state.emails_revalidate || 0,
+          not_found: state.emails_not_found || 0,
+          next_step: "MailBridge: corre las columnas de la cascada de correo (Cache (Clay) → Prospeo → Findymail → Verificación → Email) en las filas sin correo",
+          ...(state.email_spend_usd ? { legacy_spent_usd: state.email_spend_usd } : {}),
         },
     started_at: state.started_at ?? null,
     finished_at: state.finished_at ?? null,

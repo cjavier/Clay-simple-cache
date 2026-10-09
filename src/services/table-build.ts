@@ -10,7 +10,7 @@ const JUNK_LOCAL = new RegExp(
   "^(info|ventas|venta|contacto|contact|sales|hola|hello|admin|administracion|" +
     "facturacion|facturas|recepcion|rh|rrhh|recursoshumanos|soporte|support|" +
     "marketing|compras|atencion|atencionaclientes|servicio|servicios|office|" +
-    "mail|email|correo|webmaster|postmaster|jobs|empleo|empleos|careers|" +
+    "mail|email|correo|webmaster|postmaster|jobs|empleo|empleos|careers|gerencia|direccion|" +
     "noreply|no-reply|no\\.reply|donotreply|test|prueba)$",
   "i"
 );

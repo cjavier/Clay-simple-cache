@@ -60,7 +60,7 @@ curl -H "Authorization: Bearer your_secret_key" {{BASE_URL}}/profiles?email=test
 - [11. AI — Copy & Explore](#ai)
   - [\`POST /copy\`](#copy-post) · [\`POST /explore\`](#explore-post)
 - [11b. Lists for MailBridge](#tables)
-  - [\`POST /tables\`](#tables-post) · [\`POST /tables/:id/rows\`](#tables-rows-post) · [\`GET /tables/:id\`](#tables-get) · [\`POST /tables/:id/retry\`](#tables-retry-post) · [Email cascade](#email-cascade) · [\`POST /emails/retry\`](#emails-retry-post) · [\`POST /emails/lookup\`](#emails-lookup-post)
+  - [\`POST /tables\`](#tables-post) · [\`POST /tables/:id/rows\`](#tables-rows-post) · [\`GET /tables/:id\`](#tables-get) · [\`POST /tables/:id/retry\`](#tables-retry-post) · [Emails](#email-cascade) · [\`POST /emails/lookup\`](#emails-lookup-post) · [\`POST /emails/facts\`](#emails-facts-post) · [\`POST /emails/results\`](#emails-results-post)
 - [12. MCP Server](#mcp-server)
 - [13. Errors & Limits](#errors-and-limits)
 - [14. For AI Agents (llms.txt style)](#for-ai-agents)
@@ -98,7 +98,8 @@ curl -H "Authorization: Bearer your_secret_key" {{BASE_URL}}/profiles?email=test
 | \`POST\` | \`/tables/:id/rows\` | Queue rows for those tables; MailBridge receives them in the background. | [Lists](#tables-rows-post) |
 | \`GET\` | \`/tables/:id\` | Sync status per table (received, sent, pending, failed). | [Lists](#tables-get) |
 | \`POST\` | \`/tables/:id/retry\` | Requeue the batches MailBridge refused. | [Lists](#tables-retry-post) |
-| \`POST\` | \`/tables/:id/emails/retry\` · \`/emails/retry\` | Retry people the email cascade left pending (no credits, rate limit, budget, revalidation). | [Lists](#emails-retry-post) |
+| \`POST\` | \`/emails/facts\` | Free server facts for an address (MailBridge's Verificación column). | [Lists](#emails-facts-post) |
+| \`POST\` | \`/emails/results\` | MailBridge sends back what its email columns found and verified. | [Lists](#emails-results-post) |
 | \`POST\` | \`/emails/lookup\` | Free cache read: email by LinkedIn or name + domain (MailBridge \`clay_cache\`). | [Lists](#emails-lookup-post) |
 | \`POST\` | \`/mcp\` | MCP (Model Context Protocol) JSON-RPC endpoint — Streamable HTTP, stateless. | [MCP Server](#mcp-server) |
 | \`GET\`/\`DELETE\` | \`/mcp\` | \`405\` — this MCP server is stateless (no sessions to fetch/delete). | [MCP Server](#mcp-server) |
@@ -865,7 +866,7 @@ Tables are named \`<campaign> — Empresas <niche>\` and \`<campaign> — Person
 \`\`\`
 **Errors**: \`400\` missing fields / unknown client; \`502\` MailBridge failed; \`503\` not configured.
 
-**Build in the background from Blitz (optional \`build\`)**: instead of sending rows yourself, pass Blitz filters (already in Blitz's shape) and the API downloads the list on its own: companies in chunks of 50 → every person matching \`people\` at those companies (no per-company cap) → their email through the **email cascade** (cache → Blitz → Prospeo → Findymail, every address validated; see [Email cascade](#email-cascade)) → rows into the two tables. Progress is saved after every chunk; a restart resumes from the last finished one.
+**Build in the background from Blitz (optional \`build\`)**: instead of sending rows yourself, pass Blitz filters (already in Blitz's shape) and the API downloads the list on its own: companies in chunks of 50 → every person matching \`people\` at those companies (no per-company cap) → their email from what is free (the cache, then Blitz; see [Emails](#email-cascade)) — paid search and verification run in the MailBridge table's email columns → rows into the two tables. Progress is saved after every chunk; a restart resumes from the last finished one.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
@@ -875,10 +876,8 @@ Tables are named \`<campaign> — Empresas <niche>\` and \`<campaign> — Person
 | \`build.max_people\` | int | No | Stop after this many people (cuts inside the last batch of companies; companies left without people are not sent). Default: no cap. |
 | \`build.find_emails\` | bool | No | Default \`true\`. |
 | \`build.monthly\`, \`build.months\` | int | No | Contracted volume, for the coverage verdict. |
-| \`build.email_budget_usd\` | number | No | USD cap for paid finders in this job. Default 20 (\`EMAIL_BUDGET_DEFAULT_USD\`). |
-| \`build.email_policy\` | string | No | \`strict\` \| \`moderate\` \| \`permissive\`. Default \`moderate\` (\`EMAIL_ACCEPT_POLICY\`). |
 
-Requires \`BLITZAPI_KEY\` on the server. The response's \`status\` is \`building\`; \`GET /tables/:id\` adds a \`build\` block: \`status\` (\`queued\`/\`running\`/\`done\`/\`failed\`), \`tam\` (Blitz counts), \`progress\`, \`coverage\` (\`email_rate\`, \`reachable_estimate\`, \`verdict\`), \`records_used\`, and \`emails\` (\`budget_usd\`, \`spent_usd\`, \`budget_exhausted\`, \`policy\`, \`from_cache\`, \`by_source\`, \`pending\`, \`pending_now\` (live), \`discarded\`, \`awaiting_revalidation\`, \`retry\`).
+Requires \`BLITZAPI_KEY\` on the server. The response's \`status\` is \`building\`; \`GET /tables/:id\` adds a \`build\` block: \`status\` (\`queued\`/\`running\`/\`done\`/\`failed\`), \`tam\` (Blitz counts), \`progress\`, \`coverage\` (\`email_rate\`, \`reachable_estimate\`, \`verdict\`), \`records_used\`, and \`emails\` (\`from_cache\`, \`cache_unverified\`, \`by_source\`, \`not_found\`, \`next_step\`). \`build.email_budget_usd\` and \`build.email_policy\` were removed (\`400\`): the build pays nothing.
 
 <a id="tables-rows-post"></a>
 ### \`POST /tables/:id/rows\` — Send rows
@@ -913,21 +912,21 @@ Retries: MailBridge down, \`429\` or \`5xx\` → retried with backoff (5 s … 2
 ---
 
 <a id="email-cascade"></a>
-### Email cascade — how a build finds emails
+### Emails — free here, paid in MailBridge
 
-1. **Cache first**: profiles by LinkedIn slug, then name + domain. A hit keeps its original \`email_source\`; nobody pays.
-2. **Finders**: Blitz → Prospeo → Findymail, stopping at the first address that passes the policy.
-3. **Validation**: Findymail verify (resolves catch-all on Google) → DeBounce → EmailListVerify as fallbacks (circuit breaker per validator). A recent conclusive verdict (≤ 30 days) is reused.
-4. **Policy** (\`EMAIL_ACCEPT_POLICY\` / \`build.email_policy\`, default \`moderate\`): \`invalid\` and known bounces are always discarded; \`valid\` passes; \`catch_all\` passes under \`moderate\` unless there is negative evidence (domain with only bounces, this pattern bounced, Mimecast); \`unknown\`/\`risky\` wait for revalidation. \`strict\` needs a confirmed pattern for catch-all; \`permissive\` takes everything but \`invalid\`/bounced. Discarded or waiting addresses go to \`Email Found\` with \`Discard Reason\`, never to \`Email\`.
+A build only uses what is free: **the cache** (profiles by LinkedIn slug, then name + domain; a hit keeps its original \`email_source\`; it goes to \`Email\` only with a conclusive verdict of ≤ 30 days, otherwise to \`Email Found\` with \`Email Status: pendiente\` / \`sin_verificar\`) and **Blitz** (flat plan). Everyone else is \`no_encontrado\` here.
 
-"Not found" (the provider looked) is not "couldn't look" (\`pending\`: \`sin_creditos\`, \`rate_limit\`, \`error\`, \`presupuesto\`, \`revalidar\`). Pending people are retried hourly when a provider's breaker closes (free balance check), or by hand. Columns that reach MailBridge: \`Email\`, \`Email Source\`, \`Email Status\`, \`Email Found\`, \`Discard Reason\`, \`Email Verifier\`, \`Email Verdict\`, \`Email Checked At\`, \`Email Confidence\`, \`Email Validator Response\`, \`MX Provider\`, \`Mail Gateway\`, \`Domain Catch-All\`, \`Email Evidence\`, \`Expected Bounce\`, \`Send Recommendation\`, \`Email Policy\`.
+The paid search and verification run in **MailBridge's people table**, one column per step (MailBridge spec 109; added to every people table this API creates): Cache (Clay) (this API's \`/emails/lookup\`, free) → Prospeo → Findymail → Clay Function (manual-only) → Verificación (Findymail verify → DeBounce; reuses a verdict of ≤ 30 days; asks \`/emails/facts\`) → Email (acceptance policy, \`moderate\` by default: \`invalid\` and known bounces always discarded; \`catch_all\` passes unless the domain only bounced or this pattern bounced — Mimecast no longer discards; \`unknown\`/\`risky\` wait for revalidation; personal and generic inboxes discarded). MailBridge records what each provider charged (a not-found costs 0) and sends every email and verdict back here (\`/emails/results\`).
 
-<a id="emails-retry-post"></a>
-### \`POST /tables/:id/emails/retry\` · \`POST /emails/retry\` — Retry pending people
+<a id="emails-facts-post"></a>
+### \`POST /emails/facts\` — Free server facts
 
-Body (all optional): \`since\` (ISO date), \`provider\` (\`blitzapi\` | \`prospeo\` | \`findymail\` | \`verify\`), \`reason\` (\`sin_creditos\` | \`rate_limit\` | \`error\` | \`presupuesto\` | \`revalidar\`), \`budget_usd\` (default 20), \`policy\`, \`limit\`.
+\`{ "email": "ana@acme.mx", "first_name": "Ana", "last_name": "López", "linkedin_url": "…" }\` → \`{ mx_provider, mail_gateway, domain_catch_all, bad_domain, pattern, pattern_tier, address_status }\`. DNS + this cache's mail outcomes; never calls a paid provider.
 
-**Response — \`202\`**: \`{ "retrying": 37, "pending_rows": 41, "budget_usd": 20, "filter": {...} }\`. Processing runs in the background: cache first (free), then only the providers each person is pending for. Found addresses go back to the same MailBridge row (same \`ref\`). MCP: \`retry_pending_emails\`.
+<a id="emails-results-post"></a>
+### \`POST /emails/results\` — Results from MailBridge's email columns
+
+\`{ linkedin_url?, first_name?, last_name?, full_name?, company_domain?, company_name?, email, email_source, verification?: { provider, verdict, checked_at, confidence }, validator_response?, facts?, evidence?, expected_bounce?, send_recommendation?, policy?, decision?, reason? }\` (LinkedIn, or a name with \`company_domain\`) → \`200 { saved, email, email_source, verdict }\`. Saved to the profile with its provenance (also sent to MailBridge's email evidence). An \`invalid\` verdict never replaces the address a person already has.
 
 <a id="emails-lookup-post"></a>
 ### \`POST /emails/lookup\` — Free cache read (MailBridge \`clay_cache\` provider)

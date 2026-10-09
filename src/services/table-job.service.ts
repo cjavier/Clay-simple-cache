@@ -1,7 +1,7 @@
 import crypto from "crypto";
 import prisma from "../db/prisma";
 import { mailbridge, MailBridgeError, UpsertRow } from "./mailbridge.client";
-import { emailWaterfallColumn } from "./email-waterfall";
+import { addEmailCascadeColumns } from "./email-waterfall";
 import { TableKind, tableNames } from "./table-rows";
 import type { BuildConfig } from "./table-build.service";
 
@@ -40,7 +40,7 @@ export interface CreateInput {
   source?: string | null;
   /** Build the list in the background from Blitz (see table-build.service.ts). */
   build?: BuildConfig | null;
-  /** Add the email waterfall column to the people table (default true; it never runs by itself). */
+  /** Add MailBridge's email-cascade columns to the people table (default true; they never run by themselves). */
   email_waterfall?: boolean;
 }
 
@@ -68,8 +68,7 @@ export const tableJobService = {
       if (kind === "people" && input.email_waterfall !== false) {
         // A missing column must not cost the list: report it and move on.
         try {
-          await mailbridge.addColumn(t.id, emailWaterfallColumn());
-          tables[kind].email_waterfall = "added";
+          tables[kind].email_waterfall = await addEmailCascadeColumns(t.id);
         } catch (e: any) {
           tables[kind].email_waterfall = `failed: ${String(e?.message || e).slice(0, 200)}`;
         }

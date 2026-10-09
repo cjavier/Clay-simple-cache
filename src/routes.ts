@@ -68,11 +68,11 @@ router.post('/tables', authMiddleware, tablesController.create);
 router.get('/tables/:id', authMiddleware, tablesController.get);
 router.post('/tables/:id/rows', authMiddleware, tablesController.addRows);
 router.post('/tables/:id/retry', authMiddleware, tablesController.retry);
-// Email cascade: people left pending (no credits, rate limit, error, budget) → retry in the background.
-router.post('/tables/:id/emails/retry', authMiddleware, emailsController.retry);
-router.post('/emails/retry', authMiddleware, emailsController.retry);
-// Free cache read for MailBridge's `clay_cache` provider (first step of the email_cascada column).
+// Free cache read for MailBridge's `clay_cache` provider ("Cache (Clay)", first column of the email cascade).
 router.post('/emails/lookup', authMiddleware, emailsController.lookup);
+// Free server facts for MailBridge's "Verificación" column, and what its email columns found/verified, back into the cache.
+router.post('/emails/facts', authMiddleware, emailsController.facts);
+router.post('/emails/results', authMiddleware, emailsController.results);
 
 // MCP (Model Context Protocol) server — Streamable HTTP, stateless.
 router.post('/mcp', authMiddleware, mcpController.handle);

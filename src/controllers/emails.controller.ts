@@ -1,49 +1,37 @@
 import { Request, Response } from "express";
-import { lookupCachedEmail } from "../services/email-cascade/cache";
-import { defaultBudgetUsd, queueRetry, RetryFilter } from "../services/email-cascade/pending";
-import { PendingReason } from "../services/email-cascade/cascade";
-import { CASCADE_PROVIDERS, CascadeProviderId } from "../services/email-cascade/providers";
-import { tableJobService } from "../services/table-job.service";
-import { Policy, POLICIES } from "../services/email-cascade/verify";
+import { lookupCachedEmail, saveFoundEmail } from "../services/email-cascade/cache";
+import { EMPTY_FACTS, evidenceFor, POLICIES, Policy, Qualification, serverFacts, ServerFacts } from "../services/email-cascade/facts";
+import { normalizeEmail } from "../services/normalization";
+import { normalizeProvider, normalizeVerdict } from "../email-finder/provenance";
 
-const REASONS: PendingReason[] = ["sin_creditos", "rate_limit", "error", "presupuesto", "revalidar"];
-const RETRY_PROVIDERS = [...CASCADE_PROVIDERS, "verify"] as const;
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const str = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : null);
+const isObj = (v: unknown): v is Record<string, any> => typeof v === "object" && v !== null && !Array.isArray(v);
+const EMAIL = /^[^\s@*]+@[^\s@*]+\.[^\s@*]+$/;
 
-/** Body of a retry → filter, or an error message. */
-export function parseRetry(b: any): { filter: RetryFilter; budgetUsd: number; policy?: Policy } | string {
-  b = b && typeof b === "object" ? b : {};
-  const filter: RetryFilter = {};
-  if (b.provider !== undefined) {
-    if (!(RETRY_PROVIDERS as readonly string[]).includes(b.provider)) return `provider must be one of ${RETRY_PROVIDERS.join(", ")}`;
-    filter.provider = b.provider as CascadeProviderId | "verify";
-  }
-  if (b.reason !== undefined) {
-    if (!REASONS.includes(b.reason)) return `reason must be one of ${REASONS.join(", ")}`;
-    filter.reason = b.reason;
-  }
-  if (b.since !== undefined) {
-    const d = new Date(String(b.since));
-    if (Number.isNaN(d.getTime())) return "since must be a date (ISO 8601)";
-    filter.since = d;
-  }
-  if (b.limit !== undefined) {
-    if (!Number.isInteger(b.limit) || b.limit < 1 || b.limit > 5000) return "limit must be 1-5000";
-    filter.limit = b.limit;
-  }
-  let budgetUsd = defaultBudgetUsd();
-  if (b.budget_usd !== undefined) {
-    const n = Number(b.budget_usd);
-    if (!Number.isFinite(n) || n < 0 || n > 1000) return "budget_usd must be 0-1000";
-    budgetUsd = n;
-  }
-  let policy: Policy | undefined;
-  if (b.policy !== undefined) {
-    if (!(POLICIES as readonly string[]).includes(b.policy)) return `policy must be one of ${POLICIES.join(", ")}`;
-    policy = b.policy;
-  }
-  return { filter, budgetUsd, ...(policy ? { policy } : {}) };
+function person(b: any) {
+  return {
+    linkedin_url: str(b.linkedin_url),
+    first_name: str(b.first_name),
+    last_name: str(b.last_name),
+    full_name: str(b.full_name),
+    company_domain: str(b.company_domain),
+    company_name: str(b.company_name),
+  };
+}
+
+/** MailBridge's facts (when it sends them) over ours; missing keys are ours. */
+function mergeFacts(sent: unknown, own: ServerFacts): ServerFacts {
+  if (!isObj(sent)) return own;
+  const pick = <K extends keyof ServerFacts>(k: K) => (sent[k] === undefined ? own[k] : (sent[k] as ServerFacts[K]));
+  return {
+    mx_provider: pick("mx_provider"),
+    mail_gateway: pick("mail_gateway"),
+    domain_catch_all: pick("domain_catch_all"),
+    bad_domain: Boolean(pick("bad_domain")),
+    pattern: pick("pattern"),
+    pattern_tier: pick("pattern_tier"),
+    address_status: pick("address_status"),
+  };
 }
 
 export const emailsController = {
@@ -86,40 +74,84 @@ export const emailsController = {
     }
   },
 
-  /** POST /emails/retry and POST /tables/:id/emails/retry — count now, process in the background. */
-  async retry(req: Request, res: Response) {
+  /**
+   * POST /emails/facts — free: what this cache knows about the recipient's
+   * server (MX provider, security gateway, catch-all) and this domain's mail
+   * history (bad domain, pattern tier, this address' outcome). MailBridge's
+   * "Verificación" column calls it before applying the acceptance policy.
+   * Contract: {email, first_name?, last_name?, linkedin_url?} → ServerFacts.
+   */
+  async facts(req: Request, res: Response) {
     try {
-      const parsed = parseRetry(req.body);
-      if (typeof parsed === "string") {
-        res.status(400).json({ error: parsed });
+      const b = req.body || {};
+      const email = str(b.email)?.toLowerCase() ?? null;
+      if (!email || !EMAIL.test(email)) {
+        res.status(400).json({ error: "email is required" });
         return;
       }
-      let label = "reintento manual";
-      if (req.params.id !== undefined) {
-        const id = String(req.params.id);
-        const job = UUID.test(id) ? await tableJobService.get(id) : null;
-        if (!job) {
-          res.status(404).json({ error: "Table job not found" });
-          return;
-        }
-        parsed.filter.job_id = job.id;
-        label = `reintento manual ${job.campaign} — ${job.niche}`;
-      }
-      const q = await queueRetry(parsed.filter, { trigger: "manual", budgetUsd: parsed.budgetUsd, policy: parsed.policy, label });
-      res.status(202).json({
-        retrying: q.persons,
-        pending_rows: q.pending_rows,
-        budget_usd: parsed.budgetUsd,
-        filter: {
-          ...(parsed.filter.job_id ? { table_job_id: parsed.filter.job_id } : {}),
-          ...(parsed.filter.provider ? { provider: parsed.filter.provider } : {}),
-          ...(parsed.filter.reason ? { reason: parsed.filter.reason } : {}),
-          ...(parsed.filter.since ? { since: parsed.filter.since.toISOString() } : {}),
-        },
-        note: "Runs in the background: the cache is read first (free), then only the providers each person is pending for. Found emails go back to their MailBridge table (same row).",
-      });
+      res.json(await serverFacts(email, str(b.first_name), str(b.last_name), str(b.linkedin_url)));
     } catch (err) {
-      console.error("Email retry error:", err);
+      console.error("Email facts error:", err);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  },
+
+  /**
+   * POST /emails/results — MailBridge sends back what its table columns found
+   * and verified (each email with its provider, and each verdict with its
+   * verifier), so the next lookup of this person is free. Saved like the old
+   * cascade did: profile + provenance (which also reaches MailBridge's
+   * email evidence). An invalid verdict never replaces the address a person
+   * already has. Never calls a provider.
+   */
+  async results(req: Request, res: Response) {
+    try {
+      const b = req.body || {};
+      const p = person(b);
+      const email = str(b.email)?.toLowerCase() ?? null;
+      if (!email || !EMAIL.test(email)) {
+        res.status(400).json({ error: "email is required" });
+        return;
+      }
+      const hasName = Boolean(p.full_name || (p.first_name && p.last_name));
+      if (!p.linkedin_url && !(hasName && p.company_domain)) {
+        res.status(400).json({ error: "linkedin_url, or a name with company_domain, is required" });
+        return;
+      }
+      const source = normalizeProvider(str(b.email_source)) || "mailbridge";
+      const v = isObj(b.verification) ? b.verification : null;
+      const verdict = v ? normalizeVerdict(v.verdict) : null;
+      let q: Qualification | undefined;
+      if (v && verdict) {
+        const facts = mergeFacts(b.facts, b.facts ? EMPTY_FACTS : await serverFacts(email, p.first_name, p.last_name, p.linkedin_url).catch(() => EMPTY_FACTS));
+        const ev = evidenceFor(verdict, facts);
+        const policy = (POLICIES as readonly string[]).includes(b.policy) ? (b.policy as Policy) : null;
+        q = {
+          verification: {
+            provider: str(v.provider),
+            verdict,
+            checked_at: str(v.checked_at) ?? new Date().toISOString(),
+            confidence: typeof v.confidence === "number" ? v.confidence : null,
+          },
+          validator_response: b.validator_response ?? null,
+          facts,
+          evidence: str(b.evidence) ?? ev.tier,
+          expected_bounce: typeof b.expected_bounce === "number" ? b.expected_bounce : ev.expected_bounce,
+          send_recommendation: ["send", "risky", "do_not_send"].includes(b.send_recommendation) ? b.send_recommendation : ev.recommendation,
+          policy,
+          decision: policy && ["accept", "discard", "revalidate"].includes(b.decision) ? b.decision : null,
+          reason: str(b.reason),
+        };
+      }
+      await saveFoundEmail(
+        p,
+        { email: normalizeEmail(email), source, verification: verdict && !q ? { provider: str(v?.provider), verdict } : null },
+        q,
+        { foundVia: str(b.origin) ?? "mailbridge_table" }
+      );
+      res.json({ saved: true, email, email_source: source, verdict: q?.verification.verdict ?? null });
+    } catch (err) {
+      console.error("Email results error:", err);
       res.status(500).json({ error: "Internal server error" });
     }
   },

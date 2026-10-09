@@ -1,31 +1,28 @@
-import { describe, it, expect } from "vitest";
-import { emailWaterfallColumn, EMAIL_WATERFALL_KEY } from "../../src/services/email-waterfall";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 
-describe("emailWaterfallColumn", () => {
-  it("clay_cache lookup (free) → Clay function, on rows without an email", () => {
-    const c = emailWaterfallColumn("function:t_test");
-    expect(c.key).toBe(EMAIL_WATERFALL_KEY);
-    expect(c.kind).toBe("enrichment");
-    expect(c.config.providers).toEqual([
-      { id: "clay_cache", op: "lookup_email" },
-      { id: "clay", op: "routine", routineId: "function:t_test", timeoutMs: 30_000 },
-    ]);
-    // Prospeo and Findymail now run in this API's build, not in the column.
-    expect(c.config.providers.map((p) => p.id)).not.toContain("prospeo");
-    expect(c.config.providers.map((p) => p.id)).not.toContain("findymail");
-    expect(c.runCondition).toEqual([{ filters: [{ columnKey: "email", operator: "empty" }] }]);
+const calls: Array<{ tableId: string; options: unknown }> = [];
+vi.mock("../../src/services/mailbridge.client", () => ({
+  mailbridge: {
+    addEmailCascadeColumns: vi.fn(async (tableId: string, options: unknown) => {
+      calls.push({ tableId, options });
+      return { columns: [], order: ["email_cache", "email_prospeo", "email_findymail", "email_clay", "email_verificacion", "email"] };
+    }),
+  },
+}));
+
+import { addEmailCascadeColumns, clayEmailRoutineId } from "../../src/services/email-waterfall";
+
+describe("email columns of a new people table (MailBridge spec 109)", () => {
+  beforeEach(() => { calls.length = 0; delete process.env.CLAY_EMAIL_ROUTINE_ID; });
+
+  it("asks MailBridge for its email-cascade preset (one definition, there) with the Clay routine", async () => {
+    const r = await addEmailCascadeColumns("t-1");
+    expect(calls).toEqual([{ tableId: "t-1", options: { clayRoutineId: "function:t_0tmngkoVgNYaHjSNmeY" } }]);
+    expect(r).toBe("added: email_cache → email_prospeo → email_findymail → email_clay → email_verificacion → email");
   });
 
-  it("feeds the Clay function its own input names, LinkedIn included", () => {
-    const { inputs } = emailWaterfallColumn().config;
-    expect(inputs).toMatchObject({
-      "First name": "{{first_name}}",
-      "Last name": "{{last_name}}",
-      "Full Name": "{{full_name}}",
-      "Company Domain": "{{domain}}",
-      "Company Name": "{{company}}",
-      "LinkedIn URL": "{{linkedin_profile}}",
-      linkedin_url: "{{linkedin_profile}}",
-    });
+  it("CLAY_EMAIL_ROUTINE_ID overrides the Clay function", () => {
+    process.env.CLAY_EMAIL_ROUTINE_ID = "function:t_other";
+    expect(clayEmailRoutineId()).toBe("function:t_other");
   });
 });
