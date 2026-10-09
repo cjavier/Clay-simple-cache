@@ -4,6 +4,10 @@ import rateLimit from 'express-rate-limit';
 import router from './routes';
 
 const app = express();
+// Railway puts one proxy in front of us. Without this every request looks like
+// it comes from the proxy, so all callers (Clay, MailBridge, scripts) shared a
+// single rate-limit bucket, and express-rate-limit logged ERR_ERL_UNEXPECTED_X_FORWARDED_FOR.
+app.set('trust proxy', 1);
 
 // CORS: restrict to ALLOWED_ORIGINS (comma-separated) when configured; otherwise
 // keep the current open behavior so existing server-side integrations don't break.
