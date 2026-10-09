@@ -34,6 +34,8 @@ export interface BuildConfig {
   people: Record<string, unknown>;
   /** Stop after this many companies (default: all, up to Blitz's 50k). */
   max_companies: number;
+  /** Stop after this many people (default: no cap). Cuts inside the last chunk; companies left without people are not sent. */
+  max_people?: number | null;
   find_emails: boolean;
   /** contacts/month × months, to judge coverage like the skill does. */
   needed?: number | null;
@@ -144,6 +146,8 @@ export async function run(jobId: string, deps?: CascadeDeps): Promise<void> {
     for (;;) {
       const room = cfg.max_companies - (state.companies || 0);
       if (room <= 0) break;
+      const peopleRoom = cfg.max_people ? cfg.max_people - (state.people || 0) : Infinity;
+      if (peopleRoom <= 0) break;
 
       // 1. Up to 50 companies.
       let cursor = state.cursor ?? null;
@@ -173,6 +177,12 @@ export async function run(jobId: string, deps?: CascadeDeps): Promise<void> {
         seen.add(li);
         const exp = currentExperience(p, lotSet);
         people.push({ p, exp, companyLi: normLi(exp?.company_linkedin_url) });
+      }
+      const cut = people.length > peopleRoom;
+      if (cut) {
+        people.length = peopleRoom;
+        const kept = new Set(people.map((x) => x.companyLi));
+        for (const li of [...companies.keys()]) if (!kept.has(li)) companies.delete(li);
       }
 
       // 3. Emails: cache → Blitz → Prospeo → Findymail (misses cost nothing; finds count against the budget).
@@ -247,7 +257,7 @@ export async function run(jobId: string, deps?: CascadeDeps): Promise<void> {
       state.budget_exhausted = budget.exhausted || undefined;
       await save(jobId, state);
 
-      if (!cursor || page.length === 0) break;
+      if (cut || !cursor || page.length === 0) break;
     }
 
     state.finished_at = new Date().toISOString();
@@ -274,6 +284,7 @@ export function buildSummary(status: string | null, state: BuildState, cfg: Buil
       emails_valid: state.emails_valid || 0,
       chunks: state.chunks || 0,
       target_companies: cfg ? Math.min(cfg.max_companies, state.companies_total ?? cfg.max_companies) : null,
+      target_people: cfg?.max_people ?? null,
     },
     coverage: rate === null
       ? null

@@ -89,6 +89,15 @@ describe("background Blitz build", () => {
     expect(calls.pages).toEqual([null, "25"]);
   });
 
+  it("stops at max_people, cutting inside the chunk and dropping companies left without people", async () => {
+    job.build.max_people = 7;
+    await runJob("j1");
+    expect(job.build_status).toBe("done");
+    expect(job.build_state).toMatchObject({ people: 7, companies: 4, chunks: 1 });
+    expect(calls.emails).toBe(7); // only the kept people are searched
+    expect(enqueued).toEqual([{ kind: "companies", n: 4 }, { kind: "people", n: 7 }]);
+  });
+
   it("a failure keeps the cursor of the last finished chunk, and a rerun resumes there", async () => {
     calls.failAtPage = 50;
     await runJob("j1");

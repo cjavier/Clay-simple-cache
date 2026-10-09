@@ -76,6 +76,8 @@ describe("parseBuild", () => {
     expect(parseBuild({ company: {}, people: {} })).toMatch(/company/);
     expect(parseBuild({ company: { industry: {} }, max_companies: 0 })).toMatch(/max_companies/);
     expect(parseBuild({ company: { industry: {} }, max_companies: 60000 })).toMatch(/max_companies/);
+    expect(parseBuild({ company: { industry: {} }, max_people: 0 })).toMatch(/max_people/);
+    expect(parseBuild({ company: { industry: {} }, max_people: 100 })).toMatchObject({ max_people: 100 });
   });
   it("defaults to the whole TAM with emails, and computes the need", () => {
     expect(parseBuild({ company: { hq: {} }, monthly: 1000, months: 2 })).toEqual({

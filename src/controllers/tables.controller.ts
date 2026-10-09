@@ -15,6 +15,7 @@ export function parseBuild(b: unknown): BuildConfig | string {
   if (b.people !== undefined && !isObj(b.people)) return "build.people must be an object";
   const max = b.max_companies === undefined ? MAX_COMPANIES : b.max_companies;
   if (!Number.isInteger(max) || (max as number) < 1 || (max as number) > MAX_COMPANIES) return `build.max_companies must be 1-${MAX_COMPANIES}`;
+  if (b.max_people !== undefined && b.max_people !== null && (!Number.isInteger(b.max_people) || (b.max_people as number) < 1)) return "build.max_people must be a positive integer";
   if (b.find_emails !== undefined && typeof b.find_emails !== "boolean") return "build.find_emails must be boolean";
   let budget: number | undefined;
   if (b.email_budget_usd !== undefined) {
@@ -31,6 +32,7 @@ export function parseBuild(b: unknown): BuildConfig | string {
     company: b.company,
     people: (b.people as Record<string, unknown>) || {},
     max_companies: max as number,
+    ...(b.max_people ? { max_people: b.max_people as number } : {}),
     find_emails: b.find_emails !== false,
     needed: monthly ? monthly * months : null,
   };

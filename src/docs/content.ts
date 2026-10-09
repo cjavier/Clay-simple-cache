@@ -872,6 +872,7 @@ Tables are named \`<campaign> — Empresas <niche>\` and \`<campaign> — Person
 | \`build.company\` | object | **Yes** | Blitz company filter (\`/v2/search/companies\`). |
 | \`build.people\` | object | No | Blitz people filter (job level, function…). |
 | \`build.max_companies\` | int | No | Default: the whole TAM (Blitz caps a search at 50,000). |
+| \`build.max_people\` | int | No | Stop after this many people (cuts inside the last batch of companies; companies left without people are not sent). Default: no cap. |
 | \`build.find_emails\` | bool | No | Default \`true\`. |
 | \`build.monthly\`, \`build.months\` | int | No | Contracted volume, for the coverage verdict. |
 | \`build.email_budget_usd\` | number | No | USD cap for paid finders in this job. Default 20 (\`EMAIL_BUDGET_DEFAULT_USD\`). |
