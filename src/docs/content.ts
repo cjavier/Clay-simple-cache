@@ -320,6 +320,10 @@ The search spends in this order, stopping at the first answer: addresses already
 
 \`method: "known_email"\` and \`method: "domain_muted"\` both cost \`0\` — the first was answered from the cache, the second refused because the domain has never produced a result.
 
+**Filter on \`send_recommendation\`, not on \`status\`.** Every answer from \`/find\` and \`/verify\` carries \`send_recommendation\` (\`send\` | \`risky\` | \`do_not_send\`), the \`evidence\` tier behind it and its \`expected_bounce\`. They come from the bounce rate each kind of evidence showed in real MailBridge sends (audit of 2026-10-08): a \`catch_all\` whose pattern was already delivered twice at that domain bounced ~5% (\`send\`); one guessed from a single example bounced ~35–50% (\`do_not_send\`). Addresses that hard-bounced are never returned, a domain whose mail only ever bounced answers \`unknown\` with method \`domain_bounces\`, and a Mimecast gateway in front of the mailbox makes the answer \`do_not_send\` unless that very address was delivered. \`mail_gateway\` names the gateway.
+
+MailBridge reports every bounce, reply and delivery to \`POST /webhooks/mailbridge\` (event \`email_outcomes\`, HMAC-signed with \`MAILBRIDGE_WEBHOOK_SECRET\`); \`GET /stats\` → \`outcomes\` shows the real bounce rate of the last 30 days of answers by verdict and recommendation.
+
 \`timed_out: true\` means the search hit its 20-second budget before exhausting its candidates. It is **not** a verdict: it says we stopped looking, not that the address doesn't exist. Retry later rather than marking the contact dead. (It is a separate field instead of a \`status\` value because \`unknown\` already means two different things, and that ambiguity is precisely what let a 103-day provider outage read as "these people have no email".)
 
 <a id="find-batch-post"></a>

@@ -297,3 +297,65 @@ async function latencyStats(since: Date) {
 
 /** Kept exported so the alert job and the stats endpoint agree on the maths. */
 export { identifyPatternForSurnames };
+
+export interface OutcomeQualityRow {
+  result_status: string;
+  send_recommendation: string;
+  answered: number;
+  /** Answers whose fate is known: bounced, replied, or delivered ≥72h ago. */
+  measured: number;
+  bounced: number;
+  replied: number;
+  bounce_rate: number | null;
+}
+
+/**
+ * The finder graded against what happened when its answers were mailed.
+ *
+ * `agreement` above asks whether another provider found the same address; this
+ * asks whether the address bounced. Only bounces MailBridge can see count —
+ * Maildoso mailboxes filter theirs — so `measured` is deliberately the subset
+ * whose fate is known, and `bounce_rate` is over that subset.
+ */
+export async function scoreAgainstOutcomes(windowDays: number = 30): Promise<OutcomeQualityRow[]> {
+  const since = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000);
+  const rows = await prisma.$queryRaw<
+    { result_status: string; rec: string; answered: bigint; measured: bigint; bounced: bigint; replied: bigint }[]
+  >`
+    WITH answers AS (
+      SELECT result_status, COALESCE(send_recommendation, '(before)') AS rec, lower(result_email) AS email
+      FROM search_log
+      WHERE created_at >= ${since} AND result_email IS NOT NULL
+    ),
+    o AS (
+      SELECT email,
+             bool_or(bounced_at IS NOT NULL AND COALESCE(bounce_type, 'hard') <> 'soft') AS bounced,
+             bool_or(replied_at IS NOT NULL OR positive_at IS NOT NULL OR auto_replied) AS replied,
+             min(first_visible_send_at) AS first_send
+      FROM email_outcomes
+      WHERE email IN (SELECT email FROM answers)
+      GROUP BY email
+    )
+    SELECT a.result_status, a.rec,
+           count(*) AS answered,
+           count(*) FILTER (WHERE o.bounced OR o.replied OR o.first_send < now() - interval '72 hours') AS measured,
+           count(*) FILTER (WHERE o.bounced AND NOT o.replied) AS bounced,
+           count(*) FILTER (WHERE o.replied) AS replied
+    FROM answers a LEFT JOIN o ON o.email = a.email
+    GROUP BY 1, 2
+    ORDER BY 1, 2
+  `;
+  return rows.map((r) => {
+    const measured = Number(r.measured);
+    const bounced = Number(r.bounced);
+    return {
+      result_status: r.result_status,
+      send_recommendation: r.rec,
+      answered: Number(r.answered),
+      measured,
+      bounced,
+      replied: Number(r.replied),
+      bounce_rate: measured > 0 ? bounced / measured : null,
+    };
+  });
+}

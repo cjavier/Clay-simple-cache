@@ -33,6 +33,20 @@ import {
   KnownEmail,
 } from "./known-emails";
 import { getCachedSerp, cacheSerp } from "./serp-cache";
+import {
+  getDomainOutcomes,
+  getOutcomesForEmails,
+  isBadMailDomain,
+  mailGateway,
+  rankPatterns,
+  stricter,
+  EVIDENCE,
+  EvidenceTier,
+  RankedPattern,
+  DomainOutcomes,
+  SendRecommendation,
+} from "./outcomes";
+import { namePartsFromSlug } from "./identity";
 import { checkDomainHealth, recordDomainOutcome } from "./domain-health";
 import { normalizeDomain } from "../services/normalization";
 import { EmailListVerifyProvider } from "./providers/emaillistverify";
@@ -236,6 +250,66 @@ function mergePatterns(...sources: KnownPattern[][]): KnownPattern[] {
   );
 }
 
+/**
+ * What to tell the caller about an answer: the evidence tier's measured bounce
+ * rate, made stricter when a security gateway sits in front of the mailbox.
+ */
+interface Advice {
+  send_recommendation: SendRecommendation;
+  evidence: EvidenceTier | "bad_mail_domain" | "no_answer";
+  expected_bounce?: number;
+  mail_gateway: string | null;
+}
+
+function advise(
+  tier: EvidenceTier,
+  gateway: { name: string; recommendation: SendRecommendation } | null
+): Advice {
+  const e = EVIDENCE[tier];
+  // A gateway rejects cold mail by policy; only a delivery to this very
+  // address proves it lets ours through.
+  const recommendation =
+    gateway && tier !== "address_confirmed"
+      ? stricter(e.recommendation, gateway.recommendation)
+      : e.recommendation;
+  return {
+    send_recommendation: recommendation,
+    evidence: tier,
+    expected_bounce: e.expected_bounce,
+    mail_gateway: gateway?.name ?? null,
+  };
+}
+
+/**
+ * Rank the domain's patterns by mail history first, `profiles` second, and
+ * turn them into the KnownPattern list the permutator orders candidates by.
+ * Contradicted patterns go last: they are tried only if nothing else is left.
+ */
+function orderingFromRanked(ranked: RankedPattern[]): KnownPattern[] {
+  return ranked.map((r, i) => ({
+    pattern: r.pattern,
+    confidence: r.tier === "pattern_contradicted" ? 0 : 1 - i * 0.01,
+    sample_count: ranked.length - i,
+  }));
+}
+
+/**
+ * The address to answer with when probing can't tell candidates apart
+ * (catch-all), and the evidence tier it rests on. Walks the ranked patterns
+ * and takes the first one this person's name can be spelled in.
+ */
+function guessFromRanked(
+  candidates: string[],
+  ranked: RankedPattern[],
+  identity: ResolvedIdentity
+): { email: string; tier: EvidenceTier } | null {
+  for (const r of ranked) {
+    const email = candidateForPattern(candidates, r.pattern, identity);
+    if (email) return { email, tier: r.tier };
+  }
+  return candidates[0] ? { email: candidates[0], tier: "no_evidence" } : null;
+}
+
 /** The first candidate that spells the person's name under `pattern`. */
 function candidateForPattern(
   candidates: string[],
@@ -334,12 +408,15 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
       first_name: first, last_name: last, domain,
       result_status: "no_mx", method_used: VerificationMethod.local_dns,
       duration_ms: Date.now() - start, identity_source: identity.source,
+      send_recommendation: "do_not_send", evidence: "no_answer",
     });
     return makeResult({
       status: EmailStatus.no_mx,
       domain_info: domainInfo,
       duration_ms: Date.now() - start,
       ...identityInfo,
+      send_recommendation: "do_not_send",
+      evidence: "no_answer",
     });
   }
   if (domainInfo.is_disposable) {
@@ -347,39 +424,92 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
       first_name: first, last_name: last, domain,
       result_status: "disposable", method_used: VerificationMethod.local_dns,
       duration_ms: Date.now() - start, identity_source: identity.source,
+      send_recommendation: "do_not_send", evidence: "no_answer",
     });
     return makeResult({
       status: EmailStatus.disposable,
       domain_info: domainInfo,
       duration_ms: Date.now() - start,
       ...identityInfo,
+      send_recommendation: "do_not_send",
+      evidence: "no_answer",
     });
   }
 
+  // ── 4b. What happened when we actually mailed this domain ──
+  const outcomes: DomainOutcomes = await getDomainOutcomes(domain);
+  const gateway = mailGateway(domainInfo.mx_records || []);
+
+  if (isBadMailDomain(outcomes)) {
+    await logSearch({
+      first_name: first, last_name: last, domain,
+      result_status: "unknown", method_used: VerificationMethod.domain_bounces,
+      duration_ms: Date.now() - start, identity_source: identity.source,
+      send_recommendation: "do_not_send", evidence: "bad_mail_domain",
+    });
+    return makeResult({
+      status: EmailStatus.unknown,
+      method: VerificationMethod.domain_bounces,
+      domain_info: domainInfo,
+      duration_ms: Date.now() - start,
+      ...identityInfo,
+      send_recommendation: "do_not_send",
+      evidence: "bad_mail_domain",
+      mail_gateway: gateway?.name ?? null,
+    });
+  }
+
+  const bouncedHere = (email: string) => outcomes.addresses.get(email)?.status === "bounced";
+  const confirmedHere = (email: string) => {
+    const s = outcomes.addresses.get(email)?.status;
+    return s === "replied" || s === "delivered";
+  };
+
   // ── 5. Everything we already own about this domain (one indexed query) ──
-  const knownEmails = await getKnownEmailsForDomain(domain);
+  // An address that bounced is not knowledge, it is the opposite: it is
+  // dropped here so it can neither be served back nor teach a pattern.
+  // Addresses that were delivered or answered join the list with their names,
+  // so a person MailBridge already reached is recognized directly.
+  const fromProfiles = (await getKnownEmailsForDomain(domain)).filter((k) => !bouncedHere(k.email));
+  const seen = new Set(fromProfiles.map((k) => k.email));
+  const fromOutcomes: KnownEmail[] = [];
+  for (const s of outcomes.addresses.values()) {
+    if (seen.has(s.email) || !(s.status === "replied" || s.status === "delivered")) continue;
+    fromOutcomes.push({
+      email: s.email,
+      first: s.first_name || "",
+      last: s.last_name || "",
+      slug_parts: s.linkedin_slug ? namePartsFromSlug(s.linkedin_slug) : [],
+    });
+  }
+  const knownEmails = [...fromOutcomes, ...fromProfiles];
 
   // 5a. Do we already have this exact person? 7.4% of past searches were for
   // someone whose address was already sitting in `profiles`.
   const alreadyKnown = matchPerson(knownEmails, first, identity.surnames);
   if (alreadyKnown) {
     const pattern = identifyPatternForSurnames(alreadyKnown.email, first, identity.surnames);
+    const viaMail = confirmedHere(alreadyKnown.email);
+    const advice = advise(viaMail ? "address_confirmed" : "known_address", gateway);
+    const method = viaMail ? VerificationMethod.mailbridge_outcome : VerificationMethod.known_email;
     await recordDomainOutcome(domain, true);
     await logSearch({
       first_name: first, last_name: last, domain,
       result_email: alreadyKnown.email, result_status: "valid",
-      method_used: VerificationMethod.known_email,
+      method_used: method,
       duration_ms: Date.now() - start, identity_source: identity.source,
+      ...advice,
     });
     return makeResult({
       email: alreadyKnown.email,
       status: EmailStatus.valid,
-      confidence: 0.95,
-      method: VerificationMethod.known_email,
+      confidence: 1 - (advice.expected_bounce ?? 0.05),
+      method,
       pattern,
       domain_info: domainInfo,
       duration_ms: Date.now() - start,
       ...identityInfo,
+      ...advice,
     });
   }
 
@@ -396,16 +526,48 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
   // a measured number rather than an assumption.
   const candidatesBuilt = candidates.length;
 
+  // A spelling that already bounced is dead: never verify it, never guess it.
+  candidates = candidates.filter((email) => !bouncedHere(email));
+
   const dbPatterns = await getDomainPatterns(domain);
   const inferredPatterns = inferPatternsFromKnownEmails(knownEmails);
   let patterns = mergePatterns(inferredPatterns, dbPatterns);
-  candidates = prioritizePermutations(candidates, patterns, first, last);
+  let ranked = rankPatterns(patterns, outcomes);
+  candidates = prioritizePermutations(candidates, orderingFromRanked(ranked), first, last);
 
+  // "Strong" = good enough to spend a single verification on before scanning.
+  const STRONG_TIERS: EvidenceTier[] = [
+    "pattern_confirmed", "pattern_mostly_ok", "profiles_strong", "profiles_moderate",
+  ];
   const strongPattern =
-    patterns.length > 0 &&
-    patterns[0].sample_count >= config.pattern_confidence_samples
-      ? patterns[0]
+    ranked.length > 0 && STRONG_TIERS.includes(ranked[0].tier)
+      ? ranked[0]
       : null;
+
+  // ── 6b. A candidate MailBridge already delivered to or heard back from ──
+  const confirmed = candidates.find(confirmedHere);
+  if (confirmed) {
+    const advice = advise("address_confirmed", gateway);
+    await recordDomainOutcome(domain, true);
+    await logSearch({
+      first_name: first, last_name: last, domain,
+      result_email: confirmed, result_status: "valid",
+      method_used: VerificationMethod.mailbridge_outcome,
+      duration_ms: Date.now() - start, identity_source: identity.source,
+      candidates_built: candidatesBuilt, ...advice,
+    });
+    return makeResult({
+      email: confirmed,
+      status: EmailStatus.valid,
+      confidence: 0.99,
+      method: VerificationMethod.mailbridge_outcome,
+      pattern: identifyPatternForSurnames(confirmed, first, identity.surnames),
+      domain_info: domainInfo,
+      duration_ms: Date.now() - start,
+      ...identityInfo,
+      ...advice,
+    });
+  }
 
   // ── 7. Verification cache ──
   const cachedByEmail = await getCachedVerificationsBatch(candidates);
@@ -413,12 +575,17 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
     const cached = cachedByEmail.get(email);
     if (cached?.status === EmailStatus.valid) {
       const pattern = identifyPatternForSurnames(email, first, identity.surnames);
+      const advice = advise(
+        cached.method === VerificationMethod.known_email ? "known_address" : "smtp_verified",
+        gateway
+      );
       await recordDomainOutcome(domain, true);
       await logSearch({
         first_name: first, last_name: last, domain,
         result_email: email, result_status: "valid",
         method_used: cached.method, duration_ms: Date.now() - start,
         identity_source: identity.source, candidates_built: candidatesBuilt,
+        ...advice,
       });
       return makeResult({
         email,
@@ -431,6 +598,7 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
         cost_usd: 0,
         duration_ms: Date.now() - start,
         ...identityInfo,
+        ...advice,
       });
     }
   }
@@ -442,34 +610,56 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
     return !cached || cached.status === EmailStatus.catch_all;
   });
 
-  // ── 8. Known catch-all domain: probing cannot discriminate ──
-  // A catch-all server accepts every local part, so buying five identical
-  // "yes" answers tells us nothing the domain record already said. The pattern
-  // is the only real signal here, and it is right 81.5% of the time.
-  if (domainInfo.is_catch_all && patterns.length > 0) {
-    const best =
-      candidateForPattern(candidates, patterns[0].pattern, identity) ||
-      candidates[0];
-    const pattern = identifyPatternForSurnames(best, first, identity.surnames);
-    const confidence = confidenceForPattern(patterns[0]);
+  /** Answer a catch-all from the best-evidenced pattern, and log it. */
+  const answerCatchAll = async (
+    pool: string[],
+    extra: { permutations_tried?: number; api_calls_made?: number; cost_usd?: number; timed_out?: boolean; serp_info?: SerpInfo | null } = {}
+  ): Promise<VerificationResult> => {
+    const guess = guessFromRanked(pool.length > 0 ? pool : candidates, ranked, identity);
+    const email = guess?.email ?? null;
+    const advice = advise(guess?.tier ?? "no_evidence", gateway);
+    const pattern = email ? identifyPatternForSurnames(email, first, identity.surnames) : null;
+    const confidence = 1 - (advice.expected_bounce ?? 0.5);
+    if (email) {
+      await cacheVerification(email, "catch_all", confidence, VerificationMethod.domain_pattern);
+    }
     await recordDomainOutcome(domain, true);
     await logSearch({
       first_name: first, last_name: last, domain,
-      result_email: best, result_status: "catch_all",
+      result_email: email, result_status: "catch_all",
       method_used: VerificationMethod.domain_pattern,
-      duration_ms: Date.now() - start, identity_source: identity.source,
-      candidates_built: candidatesBuilt,
+      permutations_tried: extra.permutations_tried ?? 0,
+      api_calls_made: extra.api_calls_made ?? 0,
+      cost_usd: extra.cost_usd ?? 0, duration_ms: Date.now() - start,
+      identity_source: identity.source, timed_out: extra.timed_out ?? false,
+      candidates_built: candidatesBuilt, ...advice,
     });
     return makeResult({
-      email: best,
+      email,
       status: EmailStatus.catch_all,
       confidence,
       method: VerificationMethod.domain_pattern,
       pattern,
       domain_info: domainInfo,
+      serp_info: extra.serp_info ?? null,
+      permutations_tried: extra.permutations_tried ?? 0,
+      cost_usd: extra.cost_usd ?? 0,
       duration_ms: Date.now() - start,
       ...identityInfo,
+      ...(extra.timed_out ? { timed_out: true } : {}),
+      ...advice,
     });
+  };
+
+  // ── 8. Known catch-all domain: probing cannot discriminate ──
+  // A catch-all server accepts every local part, so buying five identical
+  // "yes" answers tells us nothing the domain record already said. That holds
+  // for Google Workspace too: on 240 Google "catch-all" addresses with a known
+  // fate, DeBounce and EmailListVerify both said accept-all to 231 of them,
+  // bounced or not. The only signal that separates them is mail history, which
+  // `ranked` puts first — and the recommendation says how far to trust it.
+  if (domainInfo.is_catch_all && (ranked.length > 0 || patterns.length > 0)) {
+    return await answerCatchAll(untried);
   }
 
   // ── 9. Strong pattern: verify exactly one address ──
@@ -484,33 +674,14 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
     if (verdict.status === EmailStatus.valid) {
       return await concludeValid(
         single, verdict, first, last, identity, domain, domainInfo, null,
-        permutationsTried, apiCalls, totalCost, start, identityInfo, candidatesBuilt
+        permutationsTried, apiCalls, totalCost, start, identityInfo, candidatesBuilt,
+        advise("smtp_verified", gateway)
       );
     }
     if (verdict.status === EmailStatus.catch_all) {
       await markDomainCatchAll(domain);
-      const pattern = identifyPatternForSurnames(single, first, identity.surnames);
-      await recordDomainOutcome(domain, true);
-      await cacheVerification(single, "catch_all", confidenceForPattern(strongPattern), VerificationMethod.domain_pattern);
-      await logSearch({
-        first_name: first, last_name: last, domain,
-        result_email: single, result_status: "catch_all",
-        method_used: VerificationMethod.domain_pattern,
-        permutations_tried: permutationsTried, api_calls_made: apiCalls,
-        cost_usd: totalCost, duration_ms: Date.now() - start,
-        identity_source: identity.source, candidates_built: candidatesBuilt,
-      });
-      return makeResult({
-        email: single,
-        status: EmailStatus.catch_all,
-        confidence: confidenceForPattern(strongPattern),
-        method: VerificationMethod.domain_pattern,
-        pattern,
-        domain_info: domainInfo,
-        permutations_tried: permutationsTried,
-        cost_usd: totalCost,
-        duration_ms: Date.now() - start,
-        ...identityInfo,
+      return await answerCatchAll(untried, {
+        permutations_tried: permutationsTried, api_calls_made: apiCalls, cost_usd: totalCost,
       });
     }
 
@@ -561,6 +732,7 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
         sample_count: sp.count,
       }));
       patterns = mergePatterns(patterns, asKnown);
+      ranked = rankPatterns(patterns, outcomes);
       await Promise.all(
         serpPatterns.map((sp) => saveDomainPattern(domain, sp.pattern))
       );
@@ -575,7 +747,7 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
   };
 
   // A SERP hit that spells this exact person is worth jumping the queue for.
-  let toTry = prioritizePermutations(untried, patterns, first, last);
+  let toTry = prioritizePermutations(untried, orderingFromRanked(ranked), first, last);
   if (serpDirectMatch && toTry.includes(serpDirectMatch)) {
     toTry = [serpDirectMatch, ...toTry.filter((e) => e !== serpDirectMatch)];
   }
@@ -610,7 +782,8 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
         await cacheNegativeVerifications(negatives);
         return await concludeValid(
           email, result, first, last, identity, domain, domainInfo, serpInfo,
-          permutationsTried, apiCalls, totalCost, start, identityInfo, candidatesBuilt
+          permutationsTried, apiCalls, totalCost, start, identityInfo, candidatesBuilt,
+          advise("smtp_verified", gateway)
         );
       }
 
@@ -639,38 +812,9 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
   // ── 12. Catch-all: answer from the pattern, not from the probe ──
   if (catchAllCandidate) {
     await markDomainCatchAll(domain);
-
-    const top = patterns[0] || null;
-    const best =
-      (top && candidateForPattern(toTry, top.pattern, identity)) ||
-      catchAllCandidate.email;
-    const pattern = identifyPatternForSurnames(best, first, identity.surnames);
-    const confidence = top ? confidenceForPattern(top) : 0.4;
-
-    await cacheVerification(best, "catch_all", confidence, VerificationMethod.domain_pattern);
-    await recordDomainOutcome(domain, true);
-    await logSearch({
-      first_name: first, last_name: last, domain,
-      result_email: best, result_status: "catch_all",
-      method_used: VerificationMethod.domain_pattern,
+    return await answerCatchAll(toTry, {
       permutations_tried: permutationsTried, api_calls_made: apiCalls,
-      cost_usd: totalCost, duration_ms: Date.now() - start,
-      identity_source: identity.source, timed_out: timedOut,
-      candidates_built: candidatesBuilt,
-    });
-    return makeResult({
-      email: best,
-      status: EmailStatus.catch_all,
-      confidence,
-      method: VerificationMethod.domain_pattern,
-      pattern,
-      domain_info: domainInfo,
-      serp_info: serpInfo,
-      permutations_tried: permutationsTried,
-      cost_usd: totalCost,
-      duration_ms: Date.now() - start,
-      ...identityInfo,
-      timed_out: timedOut,
+      cost_usd: totalCost, timed_out: timedOut, serp_info: serpInfo,
     });
   }
 
@@ -681,6 +825,10 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
   if (!timedOut) await recordDomainOutcome(domain, false);
 
   if (riskyCandidate) {
+    const advice: Advice = {
+      send_recommendation: "risky", evidence: "no_evidence",
+      expected_bounce: EVIDENCE.no_evidence.expected_bounce, mail_gateway: gateway?.name ?? null,
+    };
     await logSearch({
       first_name: first, last_name: last, domain,
       result_email: riskyCandidate.email, result_status: "risky",
@@ -688,9 +836,9 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
       permutations_tried: permutationsTried, api_calls_made: apiCalls,
       cost_usd: totalCost, duration_ms: Date.now() - start,
       identity_source: identity.source, timed_out: timedOut,
-      candidates_built: candidatesBuilt,
+      candidates_built: candidatesBuilt, ...advice,
     });
-    return { ...riskyCandidate, serp_info: serpInfo, duration_ms: Date.now() - start, cost_usd: totalCost, ...identityInfo, timed_out: timedOut };
+    return { ...riskyCandidate, serp_info: serpInfo, duration_ms: Date.now() - start, cost_usd: totalCost, ...identityInfo, timed_out: timedOut, ...advice };
   }
 
   await logSearch({
@@ -700,6 +848,7 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
     cost_usd: totalCost, duration_ms: Date.now() - start,
     identity_source: identity.source, timed_out: timedOut,
     candidates_built: candidatesBuilt,
+    send_recommendation: "do_not_send", evidence: "no_answer",
   });
   return makeResult({
     status: EmailStatus.unknown,
@@ -710,22 +859,10 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
     duration_ms: Date.now() - start,
     ...identityInfo,
     timed_out: timedOut,
+    send_recommendation: "do_not_send",
+    evidence: "no_answer",
+    mail_gateway: gateway?.name ?? null,
   });
-}
-
-/**
- * Confidence for an address we built from a pattern rather than confirmed.
- *
- * Anchored on the leave-one-out measurement: with three or more samples the
- * domain's dominant pattern picks the right address 81.5% of the time. Thinner
- * evidence gets a lower number rather than the same optimistic one, so a
- * downstream filter on confidence actually separates the two.
- */
-function confidenceForPattern(pattern: KnownPattern): number {
-  if (pattern.sample_count >= 5) return 0.85;
-  if (pattern.sample_count >= 3) return 0.8;
-  if (pattern.sample_count === 2) return 0.6;
-  return 0.45;
 }
 
 /** Shared tail for "we confirmed this address": learn, cache, log, return. */
@@ -743,7 +880,8 @@ async function concludeValid(
   totalCost: number,
   start: number,
   identityInfo: Record<string, unknown>,
-  candidatesBuilt: number
+  candidatesBuilt: number,
+  advice: Advice
 ): Promise<VerificationResult> {
   const pattern = identifyPatternForSurnames(email, first, identity.surnames);
   if (pattern) await saveDomainPattern(domain, pattern);
@@ -755,6 +893,7 @@ async function concludeValid(
     permutations_tried: permutationsTried, api_calls_made: apiCalls,
     cost_usd: totalCost, duration_ms: Date.now() - start,
     identity_source: identity.source, candidates_built: candidatesBuilt,
+    ...advice,
   });
 
   return makeResult({
@@ -769,14 +908,81 @@ async function concludeValid(
     cost_usd: totalCost,
     duration_ms: Date.now() - start,
     ...identityInfo,
+    ...advice,
   });
 }
 
+/**
+ * Verify one address. What happened when it was actually mailed outranks
+ * everything else: a hard bounce beats a cached `valid` and beats `profiles`
+ * (which held 10,954 bounced addresses that `/verify` used to call valid), and
+ * a delivery or a reply beats any SMTP probe.
+ */
 export async function verifySingleEmail(
   email: string,
   maxTier: number = 2
 ): Promise<VerificationResult> {
   const start = Date.now();
+  const lower = email.trim().toLowerCase();
+  const outcome = lower.includes("@")
+    ? (await getOutcomesForEmails([lower])).get(lower)
+    : undefined;
+  if (outcome?.status === "bounced") {
+    return makeResult({
+      email,
+      status: EmailStatus.invalid,
+      confidence: 0.99,
+      method: VerificationMethod.mailbridge_outcome,
+      duration_ms: Date.now() - start,
+      ...advise("address_bounced", null),
+    });
+  }
+  if (outcome?.status === "replied" || outcome?.status === "delivered") {
+    return makeResult({
+      email,
+      status: EmailStatus.valid,
+      confidence: 0.99,
+      method: VerificationMethod.mailbridge_outcome,
+      duration_ms: Date.now() - start,
+      ...advise("address_confirmed", null),
+    });
+  }
+
+  const result = await verifyWithoutOutcomes(email, maxTier, start);
+  return { ...adviceForVerdict(result), ...result };
+}
+
+/**
+ * Advice for a bare verdict, when no name is known and so no pattern evidence
+ * applies. A `catch_all` here is unresolved — the server accepts everything —
+ * so it is `risky`, never `send`.
+ */
+function adviceForVerdict(result: VerificationResult): Advice {
+  const gateway = result.domain_info ? mailGateway(result.domain_info.mx_records || []) : null;
+  switch (result.status) {
+    case EmailStatus.valid:
+      return advise(result.method === VerificationMethod.known_email ? "known_address" : "smtp_verified", gateway);
+    case EmailStatus.catch_all:
+      return {
+        send_recommendation: stricter("risky", gateway?.recommendation ?? "risky"),
+        evidence: "no_evidence",
+        expected_bounce: EVIDENCE.profiles_moderate.expected_bounce,
+        mail_gateway: gateway?.name ?? null,
+      };
+    default:
+      return {
+        send_recommendation: "do_not_send",
+        evidence: "no_answer",
+        mail_gateway: gateway?.name ?? null,
+      };
+  }
+}
+
+async function verifyWithoutOutcomes(
+  email: string,
+  maxTier: number,
+  start: number
+): Promise<VerificationResult> {
 
   // 1. Syntax check
   if (!email.includes("@")) {
@@ -882,6 +1088,11 @@ interface SearchLogEntry {
   identity_source?: string | null;
   timed_out?: boolean;
   candidates_built?: number;
+  send_recommendation?: string | null;
+  evidence?: string | null;
+  /** Carried along by `...advice`; not stored. */
+  expected_bounce?: number;
+  mail_gateway?: string | null;
 }
 
 async function logSearch(entry: SearchLogEntry): Promise<void> {
@@ -901,6 +1112,8 @@ async function logSearch(entry: SearchLogEntry): Promise<void> {
         identity_source: entry.identity_source ?? null,
         timed_out: entry.timed_out ?? false,
         candidates_built: entry.candidates_built ?? 0,
+        send_recommendation: entry.send_recommendation ?? null,
+        evidence: entry.evidence ?? null,
       },
     });
   } catch {

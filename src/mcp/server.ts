@@ -110,7 +110,10 @@ export function buildMcpServer(): McpServer {
         "Use this when you know a person's name and their company's domain but not their email. " +
         "This spends real money per call (SERP + email verification providers) — prefer get_profile first " +
         "to check the cache. Pass dnc_client to gate the call behind that client's Do Not Contact list: the " +
-        "domain is checked BEFORE spending money, and the found email is checked again before returning it.",
+        "domain is checked BEFORE spending money, and the found email is checked again before returning it. " +
+        "Filter on `send_recommendation` (send | risky | do_not_send), not on `status`: it comes from the bounce " +
+        "rate each kind of evidence showed in real MailBridge sends, so a catch_all backed by addresses that were " +
+        "delivered at that domain says send, and one guessed from a single example says do_not_send.",
       inputSchema: {
         first_name: z.string().optional().describe("Person's first name. At least one of first_name/last_name/full_name is required."),
         last_name: z.string().optional().describe("Person's last name."),
@@ -192,6 +195,10 @@ export function buildMcpServer(): McpServer {
         identity_source: result.identity_source,
         surnames_tried: result.surnames_tried,
         timed_out: result.timed_out,
+        send_recommendation: result.send_recommendation,
+        evidence: result.evidence,
+        expected_bounce: result.expected_bounce,
+        mail_gateway: result.mail_gateway ?? null,
         cost_usd: result.cost_usd,
         duration_ms: result.duration_ms,
         ...(dncRequested ? { do_not_contact: false } : {}),
@@ -241,6 +248,9 @@ export function buildMcpServer(): McpServer {
         confidence: result.confidence,
         method: result.method,
         domain_info: result.domain_info,
+        send_recommendation: result.send_recommendation,
+        evidence: result.evidence,
+        mail_gateway: result.mail_gateway ?? null,
         cost_usd: result.cost_usd,
         duration_ms: result.duration_ms,
         ...(dncRequested ? { do_not_contact: false } : {}),

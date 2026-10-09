@@ -135,6 +135,10 @@ model SearchLog {
   // the list. `permutations_tried` is what we paid for; this is what we could
   // have paid for, and the gap is what the budget is actually saving.
   candidates_built   Int      @default(0)
+  /// What the caller should do with the answer: send | risky | do_not_send.
+  send_recommendation String?
+  /// The evidence tier behind that recommendation (see email-finder/outcomes.ts).
+  evidence           String?
   created_at         DateTime @default(now()) @db.Timestamptz(6)
 
   @@index([domain])
@@ -306,4 +310,30 @@ model TableJobBatch {
   @@index([status, next_attempt_at])
   @@index([job_id])
   @@map("table_job_batches")
+}
+
+/// What happened when an address was actually mailed, reported by MailBridge.
+/// The ground truth the finder grades itself against. See
+/// src/email-finder/outcomes.ts.
+model EmailOutcome {
+  source                String
+  source_ref            String
+  email                 String
+  domain                String
+  first_name            String?
+  last_name             String?
+  linkedin_slug         String?
+  pattern               String?
+  bounced_at            DateTime? @db.Timestamptz(6)
+  bounce_type           String?
+  replied_at            DateTime? @db.Timestamptz(6)
+  positive_at           DateTime? @db.Timestamptz(6)
+  auto_replied          Boolean   @default(false)
+  first_visible_send_at DateTime? @db.Timestamptz(6)
+  updated_at            DateTime  @default(now()) @db.Timestamptz(6)
+
+  @@id([source, source_ref])
+  @@index([email])
+  @@index([domain])
+  @@map("email_outcomes")
 }

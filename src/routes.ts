@@ -14,6 +14,7 @@ import { tablesController } from './controllers/tables.controller';
 import { creditsController } from './controllers/credits.controller';
 import { docsController } from './controllers/docs.controller';
 import { authMiddleware } from './middleware/auth.middleware';
+import { mailbridgeWebhookController } from './controllers/mailbridge-webhook.controller';
 
 const router = Router();
 
@@ -71,6 +72,10 @@ router.post('/tables/:id/retry', authMiddleware, tablesController.retry);
 router.post('/mcp', authMiddleware, mcpController.handle);
 router.get('/mcp', authMiddleware, mcpController.methodNotAllowed);
 router.delete('/mcp', authMiddleware, mcpController.methodNotAllowed);
+
+// MailBridge -> outcomes (bounces, replies, deliveries). Signed by MailBridge
+// with HMAC instead of our API key, so no authMiddleware here.
+router.post('/webhooks/mailbridge', mailbridgeWebhookController.receive);
 
 router.get('/docs/api', docsController.get);
 router.get('/llms.txt', docsController.llmsTxt);

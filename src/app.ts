@@ -18,7 +18,18 @@ app.use(cors(allowedOrigins.length > 0 ? { origin: allowedOrigins } : undefined)
 // keeps the 1 MB cap.
 const jsonSmall = express.json({ limit: '1mb' });
 const jsonLarge = express.json({ limit: '15mb' });
-app.use((req, res, next) => (/^\/tables\/[^/]+\/rows$/.test(req.path) ? jsonLarge : jsonSmall)(req, res, next));
+// MailBridge's outcome webhook is verified against the exact bytes it signed,
+// so its parser keeps the raw body alongside the parsed one.
+const jsonSigned = express.json({
+    limit: '15mb',
+    verify: (req, _res, buf) => {
+        (req as any).rawBody = buf;
+    },
+});
+app.use((req, res, next) => {
+    if (req.path === '/webhooks/mailbridge') return jsonSigned(req, res, next);
+    return (/^\/tables\/[^/]+\/rows$/.test(req.path) ? jsonLarge : jsonSmall)(req, res, next);
+});
 
 // Rate limiting: a generous global limit for all requests, plus a stricter
 // limit on the costly/external-API-backed endpoints.

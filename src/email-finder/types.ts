@@ -23,6 +23,10 @@ export enum VerificationMethod {
   domain_pattern = "domain_pattern",
   /** Refused up front: this domain has never produced a result. */
   domain_muted = "domain_muted",
+  /** Answered from what happened when the address was mailed (MailBridge). */
+  mailbridge_outcome = "mailbridge_outcome",
+  /** Refused up front: mail to this domain bounces and never lands. */
+  domain_bounces = "domain_bounces",
 }
 
 export enum ProviderType {
@@ -80,6 +84,20 @@ export interface VerificationResult {
    * again later", never as "this person has no address".
    */
   timed_out?: boolean;
+  /**
+   * What to do with this answer, from the bounce rate its evidence showed in
+   * real sends (see email-finder/outcomes.ts): `send`, `risky` (expect roughly
+   * 10–25% to bounce) or `do_not_send`. This, not `status`, is what a caller
+   * should filter on: a `catch_all` can be a safe send and a `catch_all` can be
+   * a coin flip, and before October 2026 the two looked identical.
+   */
+  send_recommendation?: "send" | "risky" | "do_not_send";
+  /** The evidence tier behind the recommendation, e.g. `pattern_confirmed`. */
+  evidence?: string;
+  /** Bounce rate that evidence tier showed in real sends, 0–1. */
+  expected_bounce?: number;
+  /** Security gateway in front of the mailbox, when one is known (mimecast…). */
+  mail_gateway?: string | null;
 }
 
 export interface FindRequest {

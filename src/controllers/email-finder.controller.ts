@@ -4,7 +4,7 @@ import prisma from "../db/prisma";
 import { dncService } from "../services/dnc.service";
 import { resolveClientOr404 } from "./client-resolver";
 import { findJobService, BatchItem } from "../services/find-job.service";
-import { scoreRecentAnswers } from "../services/finder-quality.service";
+import { scoreRecentAnswers, scoreAgainstOutcomes } from "../services/finder-quality.service";
 import { debounceQueueDepth } from "../email-finder/providers/debounce";
 
 /** Muted domains, or null when the table isn't there yet. */
@@ -99,6 +99,10 @@ export const emailFinderController = {
         identity_source: result.identity_source,
         surnames_tried: result.surnames_tried,
         timed_out: result.timed_out,
+        send_recommendation: result.send_recommendation,
+        evidence: result.evidence,
+        expected_bounce: result.expected_bounce,
+        mail_gateway: result.mail_gateway ?? null,
         cost_usd: result.cost_usd,
         duration_ms: result.duration_ms,
         ...(dncRequested ? { do_not_contact: false } : {}),
@@ -143,6 +147,9 @@ export const emailFinderController = {
         confidence: result.confidence,
         method: result.method,
         domain_info: result.domain_info,
+        send_recommendation: result.send_recommendation,
+        evidence: result.evidence,
+        mail_gateway: result.mail_gateway ?? null,
         cost_usd: result.cost_usd,
         duration_ms: result.duration_ms,
         ...(dncRequested ? { do_not_contact: false } : {}),
@@ -286,6 +293,7 @@ export const emailFinderController = {
         catchAllCount,
         mutedDomains,
         quality,
+        outcomes,
       ] = await Promise.all([
         prisma.searchLog.count(),
         prisma.searchLog.count({ where: { result_status: "valid" } }),
@@ -303,6 +311,7 @@ export const emailFinderController = {
         // number, so each degrades to null on its own.
         countMutedDomains(),
         scoreRecentAnswers(windowDays).catch(() => null),
+        scoreAgainstOutcomes(30).catch(() => null),
       ]);
 
       const methods: Record<string, number> = {};
@@ -327,6 +336,9 @@ export const emailFinderController = {
         muted_domains: mutedDomains,
         debounce_queue: debounceQueueDepth(),
         quality,
+        // Ground truth: bounce rate of our answers once mailed (MailBridge),
+        // last 30 days, by verdict and by the recommendation we gave.
+        outcomes,
       });
     } catch (error: any) {
       console.error("Email Finder Stats Error:", error);
