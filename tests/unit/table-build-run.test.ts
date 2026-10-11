@@ -143,6 +143,8 @@ describe("emails in the build: only cache and Blitz (free)", () => {
     const old = applyCacheHit({ domain: "acme.mx" }, hit("ana@acme.mx", { provider: "debounce", verdict: "valid", checked_at: "2025-01-01T00:00:00Z" }));
     expect(old).toMatchObject({ email_found: "ana@acme.mx", email_status: "pendiente", discard_reason: "sin_verificar" });
     expect(old).not.toHaveProperty("email");
+    const ca = applyCacheHit({ domain: "acme.mx" }, hit("ana@acme.mx", { provider: "debounce", verdict: "catch_all", checked_at: recent }));
+    expect(ca).toMatchObject({ email: "ana@acme.mx", email_status: "valido_catch_all", email_catch_all: "si", send_recommendation: "risky" });
   });
 
   it("junk or personal addresses from Blitz are not used", async () => {

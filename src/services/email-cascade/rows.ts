@@ -29,11 +29,15 @@ export function cacheHitAccepted(hit: CacheHit, now = new Date()): boolean {
 export function cacheRowFields(hit: CacheHit, now = new Date()): Record<string, unknown> {
   const accepted = cacheHitAccepted(hit, now);
   const v = hit.email_verification as Record<string, unknown> | null;
+  // A catch-all is accepted but marked (MailBridge spec 109): Status valido_catch_all,
+  // "Catch-All (cuidado)" and Send Recommendation risky, so a campaign can treat it apart.
+  const catchAll = accepted && v?.verdict === "catch_all";
   return {
     ...(accepted ? { email: hit.email } : {}),
     email_found: hit.email,
     email_source: hit.email_source || "clay_cache",
-    email_status: accepted ? "valido" : "pendiente",
+    email_status: accepted ? (catchAll ? "valido_catch_all" : "valido") : "pendiente",
+    ...(catchAll ? { email_catch_all: "si", send_recommendation: "risky" } : {}),
     ...(accepted ? {} : { discard_reason: "sin_verificar" }),
     ...(v && v.verdict ? { email_verification: { provider: v.provider ?? null, verdict: v.verdict, ...(v.checked_at ? { checked_at: v.checked_at } : {}) } } : {}),
   };
