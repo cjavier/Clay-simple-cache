@@ -175,3 +175,26 @@ describe("emailFinderController with dnc_client", () => {
     });
   });
 });
+
+describe("emailFinderController — verification_error (2026-10-13)", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("/verify returns verification_error when the verifier could not answer", async () => {
+    mockVerifySingleEmail.mockResolvedValue({
+      email: "a@acme.mx", status: "unknown", confidence: 0, method: null, domain_info: null,
+      cost_usd: 0, duration_ms: 1, verification_error: "rate_limited",
+    });
+    const res = mockRes();
+    await emailFinderController.verify({ body: { email: "a@acme.mx" } } as any, res);
+    expect(res.json.mock.calls[0][0]).toMatchObject({ status: "unknown", verification_error: "rate_limited" });
+  });
+
+  it("/verify with a real unknown verdict carries no verification_error", async () => {
+    mockVerifySingleEmail.mockResolvedValue({
+      email: "a@acme.mx", status: "unknown", confidence: 0.3, method: "emaillistverify", domain_info: null, cost_usd: 0.0004, duration_ms: 1,
+    });
+    const res = mockRes();
+    await emailFinderController.verify({ body: { email: "a@acme.mx" } } as any, res);
+    expect(res.json.mock.calls[0][0].verification_error).toBeUndefined();
+  });
+});

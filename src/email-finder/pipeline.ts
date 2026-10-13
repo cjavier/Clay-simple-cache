@@ -339,6 +339,11 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
   );
   let totalCost = 0;
   let permutationsTried = 0;
+  // Verifier calls that failed (429, error) vs. ones that answered: a search
+  // where nothing answered ends in `unknown` + verification_error, not a verdict.
+  let verifierErrors = 0;
+  let verifierAnswered = false;
+  let lastVerifierError: VerificationResult["verification_error"] = undefined;
   let apiCalls = 0;
 
   // ── 1. Normalize the domain ──
@@ -716,11 +721,19 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
     }
 
     // The pattern's spelling is dead — fall through to the scan, minus this one.
-    await cacheNegativeVerifications([
-      { email: single, status: verdict.status, confidence: verdict.confidence, method: verdict.method },
-    ]);
-    const idx = untried.indexOf(single);
-    if (idx >= 0) untried.splice(idx, 1);
+    // A verifier that could not answer (429, error) said nothing about it: no
+    // cache entry, and it stays in the scan.
+    if (verdict.verification_error) {
+      verifierErrors++;
+      lastVerifierError = verdict.verification_error;
+    } else {
+      verifierAnswered = true;
+      await cacheNegativeVerifications([
+        { email: single, status: verdict.status, confidence: verdict.confidence, method: verdict.method },
+      ]);
+      const idx = untried.indexOf(single);
+      if (idx >= 0) untried.splice(idx, 1);
+    }
   }
 
   // ── 10. SERP, cached by domain ──
@@ -817,6 +830,14 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
         );
       }
 
+      if (result.verification_error) {
+        // Not a verdict: never cached as a negative (it would answer `unknown`
+        // for this address until the entry expired).
+        verifierErrors++;
+        lastVerifierError = result.verification_error;
+        continue;
+      }
+      verifierAnswered = true;
       if (result.status === EmailStatus.catch_all && !catchAllCandidate) {
         catchAllCandidate = { email, result };
       } else if (result.status === EmailStatus.risky && !riskyCandidate) {
@@ -892,6 +913,8 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
     send_recommendation: "do_not_send",
     evidence: "no_answer",
     mail_gateway: gateway?.name ?? null,
+    // Every verifier call failed: the search did not establish anything. Ask again later.
+    ...(verifierErrors > 0 && !verifierAnswered ? { verification_error: lastVerifierError } : {}),
   });
 }
 
