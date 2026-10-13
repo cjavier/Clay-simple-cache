@@ -152,4 +152,11 @@ describe("Blitz list build vs enforced provenance", () => {
     const noEmail = personRow({ first_name: "Beto", linkedin_url: "https://linkedin.com/in/beto" }, {}, { domain: "flete.mx" }, { found: false });
     expect(() => toUpsertRow("people", noEmail, 0, { enforceProvenance: true })).not.toThrow();
   });
+
+  it("a Blitz row carries verifier, verdict and checked_at (MailBridge promotion lock, spec 114)", () => {
+    const v = { provider: "blitzapi", verdict: "valid", checked_at: "2026-10-13T00:00:00.000Z" };
+    const row = personRow({ first_name: "Ana", linkedin_url: "https://linkedin.com/in/ana" }, {}, { domain: "flete.mx" }, { found: true, email: "ana@flete.mx" }, "blitzapi", v);
+    const up = toUpsertRow("people", row, 0, { enforceProvenance: true });
+    expect(up.data).toMatchObject({ "Email Source": "blitzapi", "Email Verifier": "blitzapi", "Email Verdict": "valid", "Email Checked At": "2026-10-13T00:00:00.000Z" });
+  });
 });

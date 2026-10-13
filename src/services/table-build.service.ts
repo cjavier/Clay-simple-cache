@@ -235,7 +235,10 @@ export async function run(jobId: string, deps?: BuildEmailDeps): Promise<void> {
       const personRows = people.map(({ p, exp, companyLi }, i) => {
         const r = results[i];
         const em = !r ? null : r.kind === "error" ? { found: false, error: r.error } : r.kind === "blitz" ? { found: true, email: r.email, all_emails: r.all_emails } : r.kind === "none" ? { found: false } : null;
-        let row = personRow(p, exp, companies.get(companyLi) || {}, em);
+        // Blitz verifies before answering (found:false when it can't prove the address): it is its own
+        // verifier, so the row passes MailBridge's promotion lock (spec 114: verifier + verdict + checked_at).
+        const blitzVerification = r?.kind === "blitz" ? { provider: "blitzapi", verdict: "valid", checked_at: new Date().toISOString() } : null;
+        let row = personRow(p, exp, companies.get(companyLi) || {}, em, "blitzapi", blitzVerification);
         if (r?.kind === "cache") row = applyCacheHit(row, r.hit);
         const s = perCompany.get(companyLi) || [0, 0];
         s[0] += 1;

@@ -55,14 +55,20 @@ async function cachedAt(email: string): Promise<Date | null> {
   }
 }
 
-/** The provider recorded when this address was ingested, for `known_email` answers. */
-async function profileSource(email: string): Promise<string | null> {
+type KnownProfile = { source: string | null; verification: { provider?: string | null; verdict?: string | null; checked_at?: string | null } | null };
+
+/** The provider and verification recorded when this address was ingested, for `known_email` answers. */
+async function profileSource(email: string): Promise<KnownProfile> {
   try {
     const row = await prisma.profile.findUnique({ where: { email }, select: { data: true } });
-    const src = (row?.data as Record<string, unknown> | null)?.email_source;
-    return typeof src === "string" ? src : null;
+    const data = (row?.data as Record<string, unknown> | null) || {};
+    const v = data.email_verification;
+    return {
+      source: typeof data.email_source === "string" ? data.email_source : null,
+      verification: v && typeof v === "object" && !Array.isArray(v) ? (v as KnownProfile["verification"]) : null,
+    };
   } catch {
-    return null;
+    return { source: null, verification: null };
   }
 }
 
@@ -77,7 +83,7 @@ export async function withProvenance(
   request?: FindRequest | null
 ): Promise<VerificationResult> {
   const fresh = isFreshFact(result);
-  let known: string | null = null;
+  let known: KnownProfile | null = null;
   let cached: Date | null = null;
   if (result.email && !fresh) {
     [cached, known] = await Promise.all([
@@ -85,7 +91,7 @@ export async function withProvenance(
       result.method === "known_email" ? profileSource(result.email) : Promise.resolve(null),
     ]);
   }
-  const p = deriveProvenance(result, { op, profileSource: known, cachedAt: cached, now });
+  const p = deriveProvenance(result, { op, profileSource: known?.source ?? null, profileVerification: known?.verification ?? null, cachedAt: cached, now });
 
   if (fresh && result.email) {
     const entry: ProvenanceEntry = {

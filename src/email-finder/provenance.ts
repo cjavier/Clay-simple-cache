@@ -106,6 +106,8 @@ export interface ProvenanceContext {
   op: "find" | "verify";
   /** Provider recorded when the address was ingested (known_email answers), if any. */
   profileSource?: string | null;
+  /** Verification recorded with the address (known_email answers): who verified it, what and when. */
+  profileVerification?: { provider?: string | null; verdict?: string | null; checked_at?: string | null } | null;
   /** When the cache row we answered from was written, for answers that cost nothing now. */
   cachedAt?: Date | null;
   now?: Date;
@@ -127,7 +129,11 @@ export function isFreshFact(result: Pick<VerificationResult, "email" | "method" 
 export function deriveProvenance(result: VerificationResult, ctx: ProvenanceContext): Provenance {
   const now = ctx.now ?? new Date();
   const method = result.method ?? null;
-  const verifier = method && PROVIDER_METHODS.has(method) ? method : null;
+  const known = method === VerificationMethod.known_email && result.email ? ctx.profileVerification ?? null : null;
+  const knownVerifier = known ? normalizeProvider(known.provider) : null;
+  // A known address answers with the verifier recorded at ingest (MailBridge's promotion lock
+  // needs one); without a recorded verifier it stays null, never invented.
+  const verifier = method && PROVIDER_METHODS.has(method) ? method : knownVerifier;
 
   let finder: string | null = null;
   if (result.email) {
@@ -139,12 +145,14 @@ export function deriveProvenance(result: VerificationResult, ctx: ProvenanceCont
   }
 
   const fresh = isFreshFact(result);
-  const checked = fresh ? now : (ctx.cachedAt ?? now);
+  const knownChecked = knownVerifier && known?.checked_at && !Number.isNaN(Date.parse(known.checked_at)) ? new Date(known.checked_at) : null;
+  const checked = fresh ? now : (knownChecked ?? ctx.cachedAt ?? now);
+  const knownVerdict = knownVerifier ? normalizeVerdict(known?.verdict ?? null) : null;
 
   return {
     finder,
     verifier,
-    verdict: normalizeVerdict(result.status) ?? "unknown",
+    verdict: knownVerdict ?? normalizeVerdict(result.status) ?? "unknown",
     raw_status: result.status ?? null,
     confidence: typeof result.confidence === "number" ? result.confidence : null,
     method,

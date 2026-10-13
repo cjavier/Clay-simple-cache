@@ -91,6 +91,17 @@ describe("isFreshFact / deriveProvenance", () => {
     expect(deriveProvenance(known, { op: "verify", now: NOW }).finder).toBeNull();
     expect(deriveProvenance(known, { op: "find", now: NOW }).finder).toBe("clay_cache");
   });
+  it("known_email answers with the verifier, verdict and date recorded at ingest (MailBridge promotion lock)", () => {
+    const known = res({ method: VerificationMethod.known_email, cost_usd: 0 });
+    const p = deriveProvenance(known, {
+      op: "find", profileSource: "prospeo", now: NOW,
+      profileVerification: { provider: "findymail", verdict: "catch_all", checked_at: "2026-09-30T00:00:00Z" },
+    });
+    expect(p).toMatchObject({ finder: "prospeo", verifier: "findymail", verdict: "catch_all", checked_at: "2026-09-30T00:00:00.000Z" });
+    // No verifier recorded: stays null (never invented), verdict from the pipeline.
+    const bare = deriveProvenance(known, { op: "find", now: NOW, profileVerification: { provider: null, verdict: "unknown" } });
+    expect(bare.verifier).toBeNull();
+  });
   it("an answer served from cache says when it was really verified, not now", () => {
     const cachedAt = new Date("2026-09-20T00:00:00Z");
     const p = deriveProvenance(res({ cost_usd: 0 }), { op: "verify", cachedAt, now: NOW });
