@@ -47,6 +47,15 @@ describe("POST /emails/facts and /emails/results (MailBridge spec 109)", () => {
     expect(opts).toEqual({ foundVia: "mailbridge_table" });
   });
 
+  it("results: bad_domain sent as text \"no\" is not read as true; \"si\" and true are", async () => {
+    const base = { linkedin_url: "li", email: "c@acme.mx", email_source: "prospeo", verification: { provider: "findymail", verdict: "valid" } };
+    for (const [v, want] of [["no", false], ["si", true], [true, true], [false, false]] as const) {
+      saved.length = 0;
+      await call(emailsController.results, { ...base, facts: { bad_domain: v } });
+      expect(saved[0][2].facts.bad_domain).toBe(want);
+    }
+  });
+
   it("results: a find without verdict is saved as found; without identity it is rejected", async () => {
     await call(emailsController.results, { linkedin_url: "li", email: "beto@acme.mx", email_source: "findymail" });
     expect(saved[0][1]).toMatchObject({ email: "beto@acme.mx", source: "findymail", verification: null });

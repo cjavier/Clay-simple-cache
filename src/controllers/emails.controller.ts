@@ -5,6 +5,7 @@ import { normalizeEmail } from "../services/normalization";
 import { normalizeProvider, normalizeVerdict } from "../email-finder/provenance";
 
 const str = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : null);
+const yes = (v: unknown) => v === true || (typeof v === "string" && /^(si|sí|true|1)$/i.test(v.trim()));
 const isObj = (v: unknown): v is Record<string, any> => typeof v === "object" && v !== null && !Array.isArray(v);
 const EMAIL = /^[^\s@*]+@[^\s@*]+\.[^\s@*]+$/;
 
@@ -27,7 +28,8 @@ function mergeFacts(sent: unknown, own: ServerFacts): ServerFacts {
     mx_provider: pick("mx_provider"),
     mail_gateway: pick("mail_gateway"),
     domain_catch_all: pick("domain_catch_all"),
-    bad_domain: Boolean(pick("bad_domain")),
+    // MailBridge sends a boolean; a "si"/"no" text (as its table cells show) must not read "no" as true.
+    bad_domain: yes(pick("bad_domain")),
     pattern: pick("pattern"),
     pattern_tier: pick("pattern_tier"),
     address_status: pick("address_status"),
