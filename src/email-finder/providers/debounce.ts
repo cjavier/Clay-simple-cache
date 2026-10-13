@@ -138,7 +138,7 @@ export class DebounceProvider implements EmailVerificationProvider {
       // Shed rather than queue. Charging nothing is important: a skipped call
       // is not a verdict, and billing for one is how a throttled provider used
       // to report a cost while returning nothing usable.
-      return base;
+      return { ...base, verification_error: "queue_full" };
     }
     try {
       const url = `https://api.debounce.io/v1/?api=${encodeURIComponent(config.debounce_api_key)}&email=${encodeURIComponent(email)}`;
@@ -159,12 +159,12 @@ export class DebounceProvider implements EmailVerificationProvider {
             continue;
           }
           console.error("DeBounce throttled the request after retries (HTTP 429)");
-          return base;
+          return { ...base, verification_error: "rate_limited" };
         }
 
         const json = await response.json().catch(() => null);
         const debounce = (json as any)?.debounce;
-        if (!debounce) return base;
+        if (!debounce) return { ...base, verification_error: "provider_error" };
 
         // An auth/quota failure arrives as { debounce: { error: "..." } } — an
         // object, so a truthiness check alone lets it through. Charging for it
@@ -176,7 +176,7 @@ export class DebounceProvider implements EmailVerificationProvider {
             continue;
           }
           console.error(`DeBounce rejected the request: ${debounce.error}`);
-          return base;
+          return { ...base, verification_error: isThrottled(response.status, debounce.error) ? "rate_limited" : "provider_error" };
         }
 
         const code = debounce.code != null ? String(debounce.code) : "";
@@ -198,9 +198,9 @@ export class DebounceProvider implements EmailVerificationProvider {
         };
       }
 
-      return base;
+      return { ...base, verification_error: "rate_limited" };
     } catch {
-      return base;
+      return { ...base, verification_error: "provider_error" };
     } finally {
       release();
     }

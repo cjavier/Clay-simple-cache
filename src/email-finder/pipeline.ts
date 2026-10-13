@@ -132,6 +132,10 @@ async function apiCascade(
   // "risky" is not conclusive: keep the first one as a fallback but keep
   // walking the cascade in case a later tier returns something conclusive.
   let riskyFallback: VerificationResult | null = null;
+  // An `unknown` is a verdict only if some provider actually answered it. If
+  // every call failed (429, error, shed), the answer is "could not verify".
+  let answered = false;
+  let lastError: VerificationResult["verification_error"] = undefined;
 
   for (let tierIdx = 0; tierIdx < TIERS.length; tierIdx++) {
     if (tierIdx + 1 > maxTier) break;
@@ -147,6 +151,8 @@ async function apiCascade(
 
       const result = await provider.verify(email);
       totalCost += result.cost_usd;
+      if (result.verification_error) lastError = result.verification_error;
+      else answered = true;
 
       if (CONCLUSIVE_STATUSES.includes(result.status)) {
         return { ...result, cost_usd: totalCost };
@@ -164,7 +170,7 @@ async function apiCascade(
     return { ...riskyFallback, cost_usd: totalCost };
   }
 
-  return makeResult({ email, cost_usd: totalCost });
+  return makeResult({ email, cost_usd: totalCost, ...(!answered && lastError ? { verification_error: lastError } : {}) });
 }
 
 /**
@@ -1087,6 +1093,7 @@ async function verifyWithoutOutcomes(
     domain_info: domainInfo,
     cost_usd: result.cost_usd,
     duration_ms: Date.now() - start,
+    ...(result.verification_error ? { verification_error: result.verification_error } : {}),
   });
 }
 

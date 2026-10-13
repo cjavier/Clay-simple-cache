@@ -266,6 +266,7 @@ export function buildMcpServer(): McpServer {
         ...provenanceFields(result),
         cost_usd: result.cost_usd,
         duration_ms: result.duration_ms,
+        ...(result.verification_error ? { verification_error: result.verification_error } : {}),
         ...(dncRequested ? { do_not_contact: false } : {}),
       });
     })

@@ -85,6 +85,14 @@ export interface VerificationResult {
    */
   timed_out?: boolean;
   /**
+   * Set when `unknown` is NOT a verdict: the verifier could not answer (rate
+   * limit, provider error, shed by the queue). `rate_limited` | `provider_error`
+   * | `queue_full`. Callers should retry later, never read it as "the mailbox
+   * is undecided" — 460 EmailListVerify 429s on 2026-10-13 came back as
+   * `unknown` and were loaded to a campaign as if they were verdicts.
+   */
+  verification_error?: "rate_limited" | "provider_error" | "queue_full";
+  /**
    * What to do with this answer, from the bounce rate its evidence showed in
    * real sends (see email-finder/outcomes.ts): `send`, `risky` (expect roughly
    * 10–25% to bounce) or `do_not_send`. This, not `status`, is what a caller

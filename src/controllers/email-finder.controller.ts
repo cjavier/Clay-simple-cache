@@ -107,6 +107,8 @@ export const emailFinderController = {
         ...provenanceFields(result),
         cost_usd: result.cost_usd,
         duration_ms: result.duration_ms,
+        // `unknown` that is not a verdict (rate limit, provider error): retry later.
+        ...(result.verification_error ? { verification_error: result.verification_error } : {}),
         ...(dncRequested ? { do_not_contact: false } : {}),
       });
     } catch (error: any) {

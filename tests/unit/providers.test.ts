@@ -360,3 +360,46 @@ describe("DebounceProvider — concurrency and throttling", () => {
     expect(results.every((r) => r.status === EmailStatus.unknown)).toBe(true);
   });
 });
+
+
+describe("EmailListVerifyProvider — rate limit (2026-10-13: 460 HTTP 429 read as unknown)", () => {
+  // A fresh module per test: the credits breaker is module state another test may have tripped.
+  async function fresh() {
+    vi.resetModules();
+    const mod = await import("../../src/email-finder/providers/emaillistverify");
+    return new mod.EmailListVerifyProvider();
+  }
+  beforeEach(() => { vi.restoreAllMocks(); vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
+  const throttled = { status: 429, headers: new Headers(), text: () => Promise.resolve('{"id":"api_too_many_requests","statuscode":429,"error":"toomanyrequests"}') };
+
+  it("retries a 429 and returns the verdict when it clears", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(throttled)
+      .mockResolvedValueOnce({ status: 200, headers: new Headers(), text: () => Promise.resolve("ok") });
+    vi.stubGlobal("fetch", fetchMock);
+    const p = (await fresh()).verify("a@acme.mx");
+    await vi.runAllTimersAsync();
+    const r = await p;
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(r.status).toBe(EmailStatus.valid);
+    expect(r.verification_error).toBeUndefined();
+  });
+
+  it("still throttled after every attempt: unknown with verification_error rate_limited, nothing charged", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(throttled));
+    const p = (await fresh()).verify("a@acme.mx");
+    await vi.runAllTimersAsync();
+    const r = await p;
+    expect(r).toMatchObject({ status: EmailStatus.unknown, verification_error: "rate_limited", cost_usd: 0 });
+  });
+
+  it("a real 'unknown' verdict carries no verification_error; invalid_syntax is invalid", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ status: 200, headers: new Headers(), text: () => Promise.resolve("antispam_system") }));
+    const r = await (await fresh()).verify("a@acme.mx");
+    expect(r.status).toBe(EmailStatus.unknown);
+    expect(r.verification_error).toBeUndefined();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ status: 200, headers: new Headers(), text: () => Promise.resolve("invalid_syntax") }));
+    expect((await (await fresh()).verify("a@acme.mx")).status).toBe(EmailStatus.invalid);
+  });
+});
