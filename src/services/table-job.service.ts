@@ -61,9 +61,15 @@ export const tableJobService = {
       filters: input.filters ?? {},
     };
 
+    // Both tables of a list go in the campaign's workbook (MailBridge spec 113),
+    // named by the campaign code, like the workbooks the migration made.
+    const workbook = await mailbridge.ensureWorkbook(client.id, input.campaign);
     const tables: Record<string, { table_id: string; name: string; email_waterfall?: string }> = {};
     for (const kind of input.kinds) {
-      const t = await mailbridge.createTable(client.id, names[kind], { ...sourceConfig, kind });
+      const t = await mailbridge.createTable(client.id, names[kind], { ...sourceConfig, kind }, {
+        entityType: kind,
+        workbookId: workbook?.id,
+      });
       tables[kind] = { table_id: t.id, name: t.name };
       if (kind === "people" && input.email_waterfall !== false) {
         // A missing column must not cost the list: report it and move on.

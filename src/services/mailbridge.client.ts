@@ -88,7 +88,33 @@ export const mailbridge = {
     return new Set((d?.tables || []).map((t: any) => t.name));
   },
 
-  async createTable(clientId: string, name: string, sourceConfig: Record<string, unknown>): Promise<{ id: string; name: string }> {
+  /**
+   * The client's workbook with this name (MailBridge spec 113: every table
+   * lives in a workbook, one per campaign code), created if missing. Returns
+   * null while MailBridge doesn't have workbooks yet (404), so a list can still
+   * be built against an older MailBridge.
+   */
+  async ensureWorkbook(clientId: string, name: string): Promise<{ id: string; name: string } | null> {
+    try {
+      const d = await call<any>("GET", `/workbooks?clientId=${clientId}`);
+      const list: any[] = d?.workbooks || d?.data || (Array.isArray(d) ? d : []);
+      const found = list.find((w) => String(w?.name || "").trim().toLowerCase() === name.trim().toLowerCase());
+      if (found) return { id: found.id, name: found.name };
+      const w = await call<any>("POST", "/workbooks", { clientId, name });
+      const created = w?.workbook || w;
+      return { id: created.id, name: created.name ?? name };
+    } catch (err) {
+      if (err instanceof MailBridgeError && err.status === 404) return null;
+      throw err;
+    }
+  },
+
+  async createTable(
+    clientId: string,
+    name: string,
+    sourceConfig: Record<string, unknown>,
+    opts: { entityType?: "people" | "companies"; workbookId?: string } = {},
+  ): Promise<{ id: string; name: string }> {
     const t = await call<any>("POST", "/tables", {
       clientId,
       name,
@@ -97,6 +123,8 @@ export const mailbridge = {
       sourceKind: "webhook",
       autoRun: false,
       sourceConfig,
+      // Spec 113 fields only once MailBridge has workbooks (ensureWorkbook found it).
+      ...(opts.workbookId ? { workbookId: opts.workbookId, ...(opts.entityType ? { entityType: opts.entityType } : {}) } : {}),
     });
     return { id: t.id, name: t.name };
   },
