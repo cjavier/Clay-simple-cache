@@ -136,6 +136,9 @@ async function apiCascade(
   // every call failed (429, error, shed), the answer is "could not verify".
   let answered = false;
   let lastError: VerificationResult["verification_error"] = undefined;
+  // Who answered `unknown`: stored with it, so a real "undecided" is never
+  // confused with a failed call (both used to be cached with method null).
+  let answeredBy: VerificationResult["method"] = null;
 
   for (let tierIdx = 0; tierIdx < TIERS.length; tierIdx++) {
     if (tierIdx + 1 > maxTier) break;
@@ -152,7 +155,10 @@ async function apiCascade(
       const result = await provider.verify(email);
       totalCost += result.cost_usd;
       if (result.verification_error) lastError = result.verification_error;
-      else answered = true;
+      else {
+        answered = true;
+        answeredBy = result.method;
+      }
 
       if (CONCLUSIVE_STATUSES.includes(result.status)) {
         return { ...result, cost_usd: totalCost };
@@ -170,7 +176,12 @@ async function apiCascade(
     return { ...riskyFallback, cost_usd: totalCost };
   }
 
-  return makeResult({ email, cost_usd: totalCost, ...(!answered && lastError ? { verification_error: lastError } : {}) });
+  return makeResult({
+    email,
+    cost_usd: totalCost,
+    method: answered ? answeredBy : null,
+    ...(!answered && lastError ? { verification_error: lastError } : {}),
+  });
 }
 
 /**

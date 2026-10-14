@@ -78,6 +78,15 @@ export async function cacheVerification(
 ): Promise<void> {
   const expiresAt = new Date(Date.now() + ttlSecondsFor(status) * 1000);
 
+  // One row per address, replaced on every write: an `unknown` must not erase a
+  // conclusive verdict that is still valid (15 valid/catch_all were covered by an
+  // `unknown` before the 2026-10-14 purge). It only lands if there is nothing
+  // better, or what is there already expired.
+  if (status === "unknown") {
+    const current = await prisma.verificationCache.findUnique({ where: { email } });
+    if (current && current.status !== "unknown" && current.expires_at > new Date()) return;
+  }
+
   await prisma.verificationCache.upsert({
     where: { email },
     update: {
