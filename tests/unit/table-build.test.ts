@@ -71,17 +71,18 @@ describe("companyRow", () => {
 });
 
 describe("parseBuild", () => {
-  it("requires a company filter and bounds max_companies", () => {
+  it("requires a company filter; max_companies has no ceiling", () => {
     expect(parseBuild({})).toMatch(/company/);
     expect(parseBuild({ company: {}, people: {} })).toMatch(/company/);
     expect(parseBuild({ company: { industry: {} }, max_companies: 0 })).toMatch(/max_companies/);
-    expect(parseBuild({ company: { industry: {} }, max_companies: 60000 })).toMatch(/max_companies/);
+    expect(parseBuild({ company: { industry: {} }, max_companies: 1.5 })).toMatch(/max_companies/);
+    expect(parseBuild({ company: { industry: {} }, max_companies: 250000 })).toMatchObject({ max_companies: 250000 });
     expect(parseBuild({ company: { industry: {} }, max_people: 0 })).toMatch(/max_people/);
     expect(parseBuild({ company: { industry: {} }, max_people: 100 })).toMatchObject({ max_people: 100 });
   });
   it("defaults to the whole TAM with emails, and computes the need", () => {
     expect(parseBuild({ company: { hq: {} }, monthly: 1000, months: 2 })).toEqual({
-      company: { hq: {} }, people: {}, max_companies: 50000, find_emails: true, needed: 2000,
+      company: { hq: {} }, people: {}, max_companies: null, find_emails: true, needed: 2000,
     });
   });
 });

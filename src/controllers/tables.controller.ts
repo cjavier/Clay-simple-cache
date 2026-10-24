@@ -3,7 +3,7 @@ import { mailbridge, mailbridgeConfigured, MailBridgeError } from "../services/m
 import { MAX_ROWS_PER_REQUEST, tableJobService } from "../services/table-job.service";
 import { RowError, TABLE_KINDS, TableKind, toUpsertRow } from "../services/table-rows";
 import { blitzConfigured } from "../services/blitz.client";
-import { BuildConfig, buildSummary, MAX_COMPANIES, tableBuildService } from "../services/table-build.service";
+import { BuildConfig, buildSummary, tableBuildService } from "../services/table-build.service";
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 
@@ -12,8 +12,8 @@ export function parseBuild(b: unknown): BuildConfig | string {
   if (!isObj(b)) return "build must be an object";
   if (!isObj(b.company) || Object.keys(b.company).length === 0) return "build.company (Blitz company filter) is required";
   if (b.people !== undefined && !isObj(b.people)) return "build.people must be an object";
-  const max = b.max_companies === undefined ? MAX_COMPANIES : b.max_companies;
-  if (!Number.isInteger(max) || (max as number) < 1 || (max as number) > MAX_COMPANIES) return `build.max_companies must be 1-${MAX_COMPANIES}`;
+  // No ceiling (Javier, 2026-10-24): a TAM above one Blitz search is split into several.
+  if (b.max_companies !== undefined && b.max_companies !== null && (!Number.isInteger(b.max_companies) || (b.max_companies as number) < 1)) return "build.max_companies must be a positive integer";
   if (b.max_people !== undefined && b.max_people !== null && (!Number.isInteger(b.max_people) || (b.max_people as number) < 1)) return "build.max_people must be a positive integer";
   if (b.find_emails !== undefined && typeof b.find_emails !== "boolean") return "build.find_emails must be boolean";
   // The build no longer pays for emails (cache + Blitz only): the old knobs are rejected, not silently ignored.
@@ -25,7 +25,7 @@ export function parseBuild(b: unknown): BuildConfig | string {
   return {
     company: b.company,
     people: (b.people as Record<string, unknown>) || {},
-    max_companies: max as number,
+    max_companies: (b.max_companies as number | null | undefined) ?? null,
     ...(b.max_people ? { max_people: b.max_people as number } : {}),
     find_emails: b.find_emails !== false,
     needed: monthly ? monthly * months : null,

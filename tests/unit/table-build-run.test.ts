@@ -1,22 +1,29 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-// A fake Blitz with 3 pages of 25 companies, 2 people each, every other person with an email.
-const companies = Array.from({ length: 75 }, (_, i) => ({ name: `E${i}`, domain: `e${i}.mx`, linkedin_url: `https://www.linkedin.com/company/e${i}` }));
-const calls = { pages: [] as Array<string | null>, emails: 0, failAtPage: -1 };
+// A fake Blitz with 75 companies (employees_on_linkedin = its index), 2 people each, every other person with an email.
+// Searches honor `employee_count` so a TAM can be split; `countBy` overrides the count (no filter) to fake a big TAM.
+const companies = Array.from({ length: 75 }, (_, i) => ({ name: `E${i}`, domain: `e${i}.mx`, linkedin_url: `https://www.linkedin.com/company/e${i}`, employees_on_linkedin: i }));
+const calls = { pages: [] as Array<string | null>, filters: [] as unknown[], emails: 0, failAtPage: -1 };
+const inRange = (company: any) => (c: { employees_on_linkedin: number }) => {
+  const r = company?.employee_count || {};
+  return (r.min === undefined || c.employees_on_linkedin >= r.min) && (r.max === undefined || c.employees_on_linkedin <= r.max);
+};
 vi.mock("../../src/services/blitz.client", () => ({
   blitzConfigured: () => true,
   BlitzError: class extends Error { constructor(m: string, public status: number) { super(m); } },
   Blitz: class {
     recordsUsed = 0;
     async init() { return this; }
-    async countCompanies() { this.recordsUsed++; return 75; }
+    async countCompanies(company: any) { this.recordsUsed++; return companies.filter(inRange(company)).length; }
     async countPeople() { this.recordsUsed++; return 150; }
-    async companiesPage(_c: object, size: number, cursor: string | null) {
+    async companiesPage(company: any, size: number, cursor: string | null) {
       const start = cursor ? Number(cursor) : 0;
       if (calls.failAtPage === start) throw new Error("Blitz down");
       calls.pages.push(cursor);
-      const results = companies.slice(start, start + size);
-      const next = start + size < companies.length ? String(start + size) : null;
+      calls.filters.push(company);
+      const all = companies.filter(inRange(company));
+      const results = all.slice(start, start + size);
+      const next = start + size < all.length ? String(start + size) : null;
       return { results, cursor: next };
     }
     async allPeople(company: { linkedin_url: string[] }) {
@@ -46,7 +53,7 @@ vi.mock("../../src/services/table-job.service", () => ({
   tableJobService: { enqueue: vi.fn(async (_id: string, kind: string, rows: unknown[]) => { enqueued.push({ kind, n: rows.length }); return []; }) },
 }));
 
-import { run, buildSummary, freeEmail, BuildEmailDeps } from "../../src/services/table-build.service";
+import { run, buildSummary, freeEmail, planSegments, BuildEmailDeps } from "../../src/services/table-build.service";
 import { Blitz } from "../../src/services/blitz.client";
 import type { CacheHit } from "../../src/services/email-cascade/cache";
 
@@ -65,9 +72,9 @@ let d: ReturnType<typeof deps>;
 const runJob = (id: string) => run(id, d);
 
 beforeEach(() => {
-  calls.pages = []; calls.emails = 0; calls.failAtPage = -1; enqueued.length = 0;
+  calls.pages = []; calls.filters = []; calls.emails = 0; calls.failAtPage = -1; enqueued.length = 0;
   d = deps();
-  job = { id: "j1", build_status: "queued", build_state: {}, build: { company: { x: 1 }, people: {}, max_companies: 50000, find_emails: true, needed: 100 } };
+  job = { id: "j1", build_status: "queued", build_state: {}, build: { company: { x: 1 }, people: {}, max_companies: null, find_emails: true, needed: 100 } };
 });
 
 describe("background Blitz build", () => {
@@ -85,7 +92,62 @@ describe("background Blitz build", () => {
     job.build.max_companies = 30;
     await runJob("j1");
     expect(job.build_state.companies).toBe(30);
-    expect(calls.pages).toEqual([null, "25"]);
+    expect(calls.pages).toEqual([null]);
+  });
+
+  it("pages of 50: Blitz's 1,000-page limit is 50,000 companies, not 25,000", async () => {
+    await runJob("j1");
+    expect(calls.pages).toEqual([null, "50"]);
+  });
+
+  it("a TAM above one search's cap is split by employee_count and every company is walked once", async () => {
+    await run("j1", d, { searchCap: 20 });
+    expect(job.build_status).toBe("done");
+    const segments = job.build_state.segments as Array<{ filter: any; total: number }>;
+    expect(segments.length).toBeGreaterThan(1);
+    expect(segments.every((s) => s.total <= 20)).toBe(true);
+    expect(segments.reduce((sum, s) => sum + s.total, 0)).toBe(75);
+    expect(segments[0].filter.employee_count).not.toHaveProperty("min");
+    expect(job.build_state).toMatchObject({ companies: 75, people: 150, uncovered: 0, segment: segments.length });
+    expect(enqueued.filter((e) => e.kind === "companies").reduce((s, e) => s + e.n, 0)).toBe(75);
+    expect(buildSummary(job.build_status, job.build_state, job.build, null)!.searches).toMatchObject({ count: segments.length, uncovered: 0 });
+  });
+
+  it("a search that cannot be split stops at its last page Blitz serves instead of asking for one more", async () => {
+    // Cap 50 = one page per search: a single employee count above it is truncated, walked one page, and the build ends.
+    job.build.company = { employee_count: { min: 10, max: 10 } };
+    companies.push(...Array.from({ length: 60 }, (_, i) => ({ name: `T${i}`, domain: `t${i}.mx`, linkedin_url: `https://www.linkedin.com/company/t${i}`, employees_on_linkedin: 10 })));
+    try {
+      await run("j1", d, { searchCap: 50 });
+    } finally {
+      companies.length = 75;
+    }
+    expect(job.build_status).toBe("done");
+    expect(calls.pages).toEqual([null]);
+    expect(job.build_state).toMatchObject({ companies: 50, uncovered: 11, segment: 1 });
+  });
+
+  it("a build started before segments resumes its cursor with pages of 25, as it was walking", async () => {
+    job.build_status = "running";
+    job.build_state = { companies_total: 75, people_total: 150, companies: 25, people: 50, emails_valid: 25, emails_searched: 50, chunks: 1, cursor: "25" };
+    await run("j1", d, { searchCap: 20 });
+    expect(job.build_status).toBe("done");
+    expect(calls.pages).toEqual(["25", "50"]);
+    expect(calls.filters.every((f) => f === job.build.company)).toBe(true);
+    expect(job.build_state).toMatchObject({ companies: 75, segments: [{ total: 75, legacy_page_size: 25 }] });
+  });
+
+  it("a split resumes inside its current search after a failure", async () => {
+    await run("j1", d, { searchCap: 40 });
+    const total = job.build_state.companies;
+    expect(total).toBe(75);
+    // Rerun from the middle: second search, first page.
+    job.build_status = "running";
+    job.build_state = { ...job.build_state, segment: 1, cursor: null, companies: job.build_state.segments[0].total };
+    enqueued.length = 0;
+    await run("j1", d, { searchCap: 40 });
+    expect(job.build_state.companies).toBe(75);
+    expect(enqueued.filter((e) => e.kind === "companies").reduce((s, e) => s + e.n, 0)).toBe(75 - job.build_state.segments[0].total);
   });
 
   it("stops at max_people, cutting inside the chunk and dropping companies left without people", async () => {
@@ -116,6 +178,47 @@ describe("background Blitz build", () => {
     job.build_status = "done";
     await runJob("j1");
     expect(calls.pages).toEqual([]);
+  });
+});
+
+describe("planSegments", () => {
+  const counter = (n: (f: any) => number) => ({ async countCompanies(f: object) { return n(f); } });
+
+  it("one search when the TAM fits", async () => {
+    expect(await planSegments(counter(() => 0), { a: 1 }, 50_000)).toEqual({ segments: [{ filter: { a: 1 }, total: 50_000 }], uncovered: 0, warning: null });
+  });
+
+  it("intersects with an employee_count the filter already carries", async () => {
+    const counts = (f: any) => {
+      const lo = f.employee_count?.min ?? 0, hi = f.employee_count?.max ?? 1_000_000;
+      return Math.max(0, Math.min(hi, 400) - Math.max(lo, 100) + 1) * 1_000;
+    };
+    const plan = await planSegments(counter(counts), { employee_count: { min: 100, max: 400 } }, 301_000);
+    expect(plan.uncovered).toBe(0);
+    expect(plan.segments.every((s) => s.filter.employee_count.min >= 100 && s.filter.employee_count.max <= 400)).toBe(true);
+    expect(plan.segments.reduce((s, x) => s + x.total, 0)).toBe(301_000);
+  });
+
+  it("a single employee count above the cap is walked up to the cap and the rest reported", async () => {
+    // 80k companies with 0 employees on LinkedIn, 10k with 5.
+    const counts = (f: any) => {
+      const lo = f.employee_count?.min ?? 0, hi = f.employee_count?.max ?? 1_000_000;
+      return (lo <= 0 && 0 <= hi ? 80_000 : 0) + (lo <= 5 && 5 <= hi ? 10_000 : 0);
+    };
+    const plan = await planSegments(counter(counts), {}, 90_000);
+    expect(plan.segments).toHaveLength(2);
+    expect(plan.segments[0]).toMatchObject({ total: 80_000, truncated: true });
+    expect(plan.segments[0].filter.employee_count).toEqual({ max: 1 });
+    expect(plan.segments[1]).toMatchObject({ total: 10_000 });
+    expect(plan.uncovered).toBe(30_000);
+    expect(plan.warning).toMatch(/30000/);
+  });
+
+  it("does not trust a split that doesn't add up", async () => {
+    const plan = await planSegments(counter(() => 60_000), {}, 100_000);
+    expect(plan.segments).toEqual([{ filter: {}, total: 100_000, truncated: true }]);
+    expect(plan.uncovered).toBe(50_000);
+    expect(plan.warning).toMatch(/added up/);
   });
 });
 

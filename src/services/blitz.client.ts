@@ -8,7 +8,8 @@
  * calibrates it with counts before anything is downloaded.
  *
  * Plan facts (2026-10-08): counting costs 1 record; an email not found costs 0;
- * a search returns at most 1,000 pages / 50k results.
+ * a search returns at most 1,000 pages of up to 50 (50k results) — the build
+ * splits a bigger TAM into several searches (table-build.service planSegments).
  */
 
 const BASE = "https://api.blitz-api.ai";

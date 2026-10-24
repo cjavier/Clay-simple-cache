@@ -12,11 +12,16 @@ import { blitzClient, CascadePerson, usable } from "./email-cascade/blitz";
  * counts and a 100-company sample; once it's right, it hands the translated
  * Blitz filters here and walks away.
  *
- * Works in chunks of up to 50 companies (two pages of Blitz's company search):
- * people of those companies → their emails → rows queued for MailBridge. The
- * Blitz cursor and the counters are saved after every chunk, so a deploy only
- * repeats the chunk in flight — and repeating is harmless, because MailBridge
- * upserts each row by its LinkedIn.
+ * Works in chunks of 50 companies (one page of Blitz's company search, its
+ * maximum): people of those companies → their emails → rows queued for
+ * MailBridge. The Blitz cursor and the counters are saved after every chunk, so
+ * a deploy only repeats the chunk in flight — and repeating is harmless,
+ * because MailBridge upserts each row by its LinkedIn.
+ *
+ * No cap of companies (Javier, 2026-10-24). A single Blitz search stops at its
+ * 1,000th page (50,000 companies), so a bigger TAM is split into searches that
+ * fit — disjoint ranges of `employee_count` — walked one after the other
+ * (`planSegments`).
  *
  * No cap of contacts per company (Javier, 2026-10-05).
  *
@@ -31,8 +36,8 @@ import { blitzClient, CascadePerson, usable } from "./email-cascade/blitz";
 export interface BuildConfig {
   company: Record<string, unknown>;
   people: Record<string, unknown>;
-  /** Stop after this many companies (default: all, up to Blitz's 50k). */
-  max_companies: number;
+  /** Stop after this many companies (default: no cap — the whole TAM). */
+  max_companies?: number | null;
   /** Stop after this many people (default: no cap). Cuts inside the last chunk; companies left without people are not sent. */
   max_people?: number | null;
   find_emails: boolean;
@@ -40,8 +45,29 @@ export interface BuildConfig {
   needed?: number | null;
 }
 
+/** One Blitz search of the build: at most BLITZ_SEARCH_CAP companies are reachable through its cursor. */
+export interface BuildSegment {
+  filter: Record<string, unknown>;
+  total: number;
+  /** Still above the cap after splitting as far as it goes: only its first BLITZ_SEARCH_CAP are walked. */
+  truncated?: boolean;
+  /**
+   * A build started before segments (pages of 25) keeps its page size and walks until Blitz ends it,
+   * as it did: its saved cursor was made with limit=25, and how Blitz reads it with another size is unknown.
+   */
+  legacy_page_size?: number;
+}
+
 export interface BuildState {
+  /** Cursor inside the current segment. */
   cursor?: string | null;
+  segments?: BuildSegment[];
+  segment?: number;
+  /** Pages walked in the current segment: Blitz refuses past its 1,000th. */
+  segment_pages?: number;
+  /** Companies of the TAM no segment reaches (truncated segments, or a split that didn't add up). */
+  uncovered?: number;
+  segment_warning?: string | null;
   companies_total?: number;
   people_total?: number;
   companies?: number;
@@ -63,11 +89,70 @@ export interface BuildState {
   finished_at?: string;
 }
 
-const CHUNK_PAGES = 2;
-const PAGE_SIZE = 25;
+/** Blitz's maximum page size for /v2/search/companies; with 25 the 1,000-page limit cut a search at 25,000. */
+const PAGE_SIZE = 50;
+const LEGACY_PAGE_SIZE = 25;
 const EMAIL_CONCURRENCY = Number(process.env.BLITZ_EMAIL_CONCURRENCY || 20);
 const STALE_AFTER_MS = 10 * 60 * 1000;
-export const MAX_COMPANIES = 50_000;
+/** Blitz: "Pagination is limited to 1,000 pages" × 50 per page. */
+export const BLITZ_SEARCH_CAP = 50_000;
+/** Upper bound of `employee_count.max` in Blitz's schema. */
+const EMPLOYEE_COUNT_MAX = 1_000_000;
+
+const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+
+/**
+ * Splits a company filter into searches of at most `cap` companies each, by halving ranges of
+ * `employee_count` (intersected with the one the filter may already carry). The ends stay open —
+ * the lowest range has no `min`, the highest no `max` — so companies without a count, or at 0,
+ * fall in the first one; no range ever carries `max: 0`, which Blitz reads as "unset".
+ *
+ * If the counts of the pieces don't add up to the TAM (Blitz read the ranges differently than
+ * assumed: overlap or gaps), the split is not trusted: one search, the first `cap` companies, and
+ * the rest reported as uncovered. Each count costs one Blitz record.
+ */
+export async function planSegments(
+  bz: { countCompanies(company: object): Promise<number> },
+  company: Record<string, unknown>,
+  total: number,
+  cap = BLITZ_SEARCH_CAP,
+): Promise<{ segments: BuildSegment[]; uncovered: number; warning: string | null }> {
+  if (total <= cap) return { segments: [{ filter: company, total }], uncovered: 0, warning: null };
+  const own = isObj(company.employee_count) ? company.employee_count : {};
+  const ownMin = Number(own.min) > 0 ? Math.floor(Number(own.min)) : null;
+  const ownMax = Number(own.max) > 0 ? Math.floor(Number(own.max)) : null;
+  const segments: BuildSegment[] = [];
+
+  const split = async (lo: number, hi: number, openLow: boolean, openHigh: boolean, known?: number): Promise<void> => {
+    const filter = { ...company, employee_count: { ...(openLow ? {} : { min: lo }), ...(openHigh ? {} : { max: hi }) } };
+    if (openLow && openHigh) delete (filter as Record<string, unknown>).employee_count;
+    const n = known ?? (await bz.countCompanies(filter));
+    if (n === 0) return;
+    const mid = Math.floor((lo + hi) / 2);
+    if (n <= cap || hi <= lo || (openLow && mid < 1)) {
+      segments.push({ filter, total: n, ...(n > cap ? { truncated: true } : {}) });
+      return;
+    }
+    await split(lo, mid, openLow, false);
+    await split(mid + 1, hi, false, openHigh);
+  };
+  await split(ownMin ?? 0, ownMax ?? EMPLOYEE_COUNT_MAX, ownMin === null, ownMax === null, ownMin === null && ownMax === null ? total : undefined);
+
+  const sum = segments.reduce((s, x) => s + x.total, 0);
+  if (Math.abs(sum - total) > Math.max(10, total * 0.02)) {
+    return {
+      segments: [{ filter: company, total, truncated: true }],
+      uncovered: total - cap,
+      warning: `splitting by employee_count added up to ${sum} of ${total} companies; walked one search (its first ${cap}) instead`,
+    };
+  }
+  const uncovered = segments.reduce((s, x) => s + Math.max(0, x.total - cap), 0);
+  return {
+    segments,
+    uncovered,
+    warning: uncovered > 0 ? `${uncovered} companies are in employee_count ranges above ${cap} that cannot be split further` : null,
+  };
+}
 
 const running = new Set<string>();
 
@@ -136,7 +221,7 @@ export async function freeEmail(person: CascadePerson, deps: BuildEmailDeps): Pr
   }
 }
 
-export async function run(jobId: string, deps?: BuildEmailDeps): Promise<void> {
+export async function run(jobId: string, deps?: BuildEmailDeps, opts: { searchCap?: number } = {}): Promise<void> {
   const job = await prisma.tableJob.findUnique({ where: { id: jobId } });
   if (!job || !job.build || !["queued", "running"].includes(job.build_status || "")) return;
   const cfg = job.build as unknown as BuildConfig;
@@ -155,23 +240,28 @@ export async function run(jobId: string, deps?: BuildEmailDeps): Promise<void> {
       state.started_at = new Date().toISOString();
       Object.assign(state, { companies: 0, people: 0, emails_valid: 0, emails_searched: 0, chunks: 0, cursor: null });
     }
+    if (!state.segments) {
+      // A build started before segments existed resumes its one search where its cursor was.
+      const legacy = Boolean(state.cursor) || (state.companies || 0) > 0;
+      const plan = legacy
+        ? { segments: [{ filter: cfg.company, total: state.companies_total ?? 0, legacy_page_size: LEGACY_PAGE_SIZE }], uncovered: 0, warning: null }
+        : await planSegments(bz, cfg.company, state.companies_total ?? 0, opts.searchCap);
+      Object.assign(state, { segments: plan.segments, segment: 0, uncovered: plan.uncovered, segment_warning: plan.warning });
+    }
     await save(jobId, { ...state, records_used: used() }, { build_status: "running", build_error: null });
 
     for (;;) {
-      const room = cfg.max_companies - (state.companies || 0);
+      const room = (cfg.max_companies ?? Infinity) - (state.companies || 0);
       if (room <= 0) break;
       const peopleRoom = cfg.max_people ? cfg.max_people - (state.people || 0) : Infinity;
       if (peopleRoom <= 0) break;
+      const segment = state.segments![state.segment || 0];
+      if (!segment) break;
 
-      // 1. Up to 50 companies.
-      let cursor = state.cursor ?? null;
-      const page: any[] = [];
-      for (let i = 0; i < CHUNK_PAGES && page.length < room; i++) {
-        const r = await bz.companiesPage(cfg.company, Math.min(PAGE_SIZE, room - page.length), cursor);
-        page.push(...r.results);
-        cursor = r.cursor;
-        if (!cursor || r.results.length === 0) break;
-      }
+      // 1. Up to 50 companies of the current search.
+      const r = await bz.companiesPage(segment.filter, Math.min(segment.legacy_page_size ?? PAGE_SIZE, room), state.cursor ?? null);
+      const page: any[] = r.results;
+      const cursor = r.cursor;
       const companies = new Map<string, any>();
       for (const c of page) {
         const li = normLi(c?.linkedin_url);
@@ -257,7 +347,13 @@ export async function run(jobId: string, deps?: BuildEmailDeps): Promise<void> {
         await tableJobService.enqueue(jobId, "people", personRows.map((r, i) => toUpsertRow("people", r, i)));
       }
 
-      state.cursor = cursor;
+      // The end of this search (or its last page Blitz serves) moves on to the next one, from its first page.
+      const pages = (state.segment_pages || 0) + 1;
+      const lastPage = !segment.legacy_page_size && pages >= Math.ceil((opts.searchCap ?? BLITZ_SEARCH_CAP) / PAGE_SIZE);
+      const segmentDone = !cursor || page.length === 0 || lastPage;
+      state.cursor = segmentDone ? null : cursor;
+      state.segment_pages = segmentDone ? 0 : pages;
+      if (segmentDone) state.segment = (state.segment || 0) + 1;
       state.chunks = (state.chunks || 0) + 1;
       state.companies = (state.companies || 0) + companies.size;
       state.people = (state.people || 0) + people.length;
@@ -266,7 +362,7 @@ export async function run(jobId: string, deps?: BuildEmailDeps): Promise<void> {
       state.records_used = used();
       await save(jobId, state);
 
-      if (cut || !cursor || page.length === 0) break;
+      if (cut || (segmentDone && (state.segment || 0) >= state.segments!.length)) break;
     }
 
     state.finished_at = new Date().toISOString();
@@ -276,6 +372,8 @@ export async function run(jobId: string, deps?: BuildEmailDeps): Promise<void> {
     await save(jobId, state, { build_status: "failed", build_error: String(err?.message || err).slice(0, 1000) });
   }
 }
+
+const finite = (n: number): number | null => (Number.isFinite(n) ? n : null);
 
 /** What GET /tables/:id shows about the build, including the coverage verdict. */
 export function buildSummary(status: string | null, state: BuildState, cfg: BuildConfig | null, error: string | null) {
@@ -292,7 +390,7 @@ export function buildSummary(status: string | null, state: BuildState, cfg: Buil
       people: state.people || 0,
       emails_valid: state.emails_valid || 0,
       chunks: state.chunks || 0,
-      target_companies: cfg ? Math.min(cfg.max_companies, state.companies_total ?? cfg.max_companies) : null,
+      target_companies: finite(Math.min(cfg?.max_companies ?? Infinity, state.companies_total ?? Infinity)),
       target_people: cfg?.max_people ?? null,
     },
     coverage: rate === null
@@ -305,6 +403,10 @@ export function buildSummary(status: string | null, state: BuildState, cfg: Buil
             ? reachable >= needed * 3 ? "HOLGADO" : reachable >= needed ? "AJUSTADO" : "INSUFICIENTE"
             : null,
         },
+    // Blitz searches the TAM was split into (one stops at 50,000 companies).
+    searches: state.segments
+      ? { count: state.segments.length, current: Math.min((state.segment || 0) + 1, state.segments.length), uncovered: state.uncovered || 0, warning: state.segment_warning ?? null }
+      : null,
     records_used: state.records_used || 0,
     emails: cfg?.find_emails === false
       ? null
