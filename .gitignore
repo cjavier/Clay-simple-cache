@@ -3,3 +3,5 @@ dist
 .env
 .DS_Store
 excalidraw.log
+
+scripts/migration/.local/

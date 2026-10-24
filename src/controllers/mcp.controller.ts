@@ -14,6 +14,13 @@ export const mcpController = {
    * on a horizontally-scaled deployment.
    */
   async handle(req: Request, res: Response): Promise<void> {
+    // One line per tool call: which tools are still in use decides what the
+    // migration to sistema-outbound has to port before this service is retired.
+    for (const msg of Array.isArray(req.body) ? req.body : [req.body]) {
+      if (msg?.method === "tools/call") {
+        console.log(`[mcp] tools/call ${msg.params?.name ?? "?"} ua=${req.get("user-agent") ?? ""}`);
+      }
+    }
     const server = buildMcpServer();
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
