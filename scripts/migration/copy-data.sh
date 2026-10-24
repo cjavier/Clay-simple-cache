@@ -8,6 +8,8 @@
 #   SRC_URL=… DST_URL=… copy-data.sh delta 2026-10-24T00:00:00Z   # upsert rows touched since
 #   DELETE_GONE=1 … delta <since>   # also delete target keys gone at the source (freeze only)
 #   SRC_URL=… DST_URL=… copy-data.sh verify                         # count + md5 per table
+#   ONLY=profiles,search_log … full|delta|verify   # a subset, still in FK order
+#   VERIFY_FAST=1 … verify <since>   # freeze: table_job_batches.rows hashed only where updated since
 #   SRC_URL=… DST_URL=… copy-data.sh refresh <table>                # re-copy one table whole
 #
 # full refuses to run on a non-empty target table. delta upserts by primary key
@@ -25,6 +27,8 @@ SRC_SCHEMA="${SRC_SCHEMA:-public}"  # clay_cache when the source is a copy alrea
 # its pooler ignores PGOPTIONS, so src() also sets it in the session.
 export PGTZ=UTC PGOPTIONS="-c TimeZone=UTC -c statement_timeout=0"
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
+# Page cache of copy_table (holds row data: keep it private, it is removed per table on success).
+CACHE_DIR="${CACHE_DIR:-${TMPDIR:-/tmp}/clay-copy-cache}"
 
 # table|primary key|change signal|delta mode. Parents before children.
 #   signal: timestamp columns every write path sets (newest of them = last touched)
@@ -53,6 +57,14 @@ TABLES=(
   "email_provider_state|provider|updated_at|refresh"  # 5 rows
 )
 
+# ONLY=t1,t2 limits full/delta/verify to those tables (still in FK order).
+if [[ -n ${ONLY:-} ]]; then
+  _keep=()
+  for spec in "${TABLES[@]}"; do [[ ",$ONLY," == *",${spec%%|*},"* ]] && _keep+=("$spec"); done
+  [[ ${#_keep[@]} -gt 0 ]] || { echo "ONLY=$ONLY matches no table"; exit 2; }
+  TABLES=("${_keep[@]}")
+fi
+
 src() { psql "$SRC_URL" -X -v ON_ERROR_STOP=1 -At -c "set statement_timeout = 0" -c "set timezone = 'UTC'" "$@" | sed "/^SET$/d"; }
 dst() { psql "$DST_URL" -X -v ON_ERROR_STOP=1 -At "$@"; }  # no pooler: PGOPTIONS applies; stdin stays free for delta
 
@@ -78,33 +90,49 @@ copy_table() { # $1 table
   # Supabase pooler drops any session that streams for minutes, and the Free
   # instance serves table_job_batches' jsonb at ~200 KB/s. The load is one
   # target transaction, so a table lands whole or not at all.
-  local t=$1 c parts=() i prev="" b
+  #
+  # Pages and their plan live in $CACHE_DIR until the load commits: a rejected
+  # load (say, an FK) reruns from disk instead of paying the source read again.
+  # A page is only kept once complete (written to .part, then renamed). Rows
+  # the source gains after the plan was made are the delta's job.
+  local t=$1 c parts=() i prev="" b dir
   local page=${PAGE:-20000}
   [[ $t == table_job_batches ]] && page=${PAGE_BATCHES:-150}
+  dir="$CACHE_DIR/$(printf '%s|%s' "$SRC_URL" "$SRC_SCHEMA" | shasum | cut -c1-10)/$t"
+  mkdir -p "$dir"; chmod 700 "$CACHE_DIR"
   c=$(cols "$t")
-  if [[ -n "$(src -c "select 1 from information_schema.columns where table_schema='$SRC_SCHEMA' and table_name='$t' and column_name='id'")" ]]; then
-    # Page boundaries from the ids alone (index-only, cheap).
-    while read -r b; do
-      parts+=("${prev:+id > '$prev' and }id <= '$b'"); prev=$b
-    done < <(src -c "select id from (select id, row_number() over (order by id) rn from $SRC_SCHEMA.$t) s where rn % $page = 0 order by id")
-    parts+=("${prev:+id > '$prev'}"); [[ -z "$prev" ]] && parts[${#parts[@]}-1]="true"
+  if [[ -s "$dir/plan" ]]; then
+    while IFS= read -r b; do parts+=("$b"); done < "$dir/plan"
+    echo "  $t: resuming a saved plan of ${#parts[@]} pages ($(ls "$dir" | grep -c '\.copy$') already on disk)" >&2
   else
-    parts=("true")
+    if [[ -n "$(src -c "select 1 from information_schema.columns where table_schema='$SRC_SCHEMA' and table_name='$t' and column_name='id'")" ]]; then
+      # Page boundaries from the ids alone (index-only, cheap).
+      while read -r b; do
+        parts+=("${prev:+id > '$prev' and }id <= '$b'"); prev=$b
+      done < <(src -c "select id from (select id, row_number() over (order by id) rn from $SRC_SCHEMA.$t) s where rn % $page = 0 order by id")
+      parts+=("${prev:+id > '$prev'}"); [[ -z "$prev" ]] && parts[${#parts[@]}-1]="true"
+    else
+      parts=("true")
+    fi
+    printf '%s\n' "${parts[@]}" > "$dir/plan"
   fi
   for i in "${!parts[@]}"; do
+    [[ -f "$dir/$i.copy" ]] && continue
     local ok=0 try
     for try in 1 2 3 4 5; do
-      if src -c "\\copy (select $c from $SRC_SCHEMA.$t where ${parts[$i]}) to '$TMP/$t.$i'"; then ok=1; break; fi
+      if src -c "\\copy (select $c from $SRC_SCHEMA.$t where ${parts[$i]}) to '$dir/$i.part'"; then
+        mv "$dir/$i.part" "$dir/$i.copy"; ok=1; break
+      fi
       echo "  $t page $i: retry $try" >&2; sleep $((try * 5))
     done
-    [[ $ok == 1 ]] || { echo "✗ $t: page $i failed 5 times, nothing loaded"; return 1; }
+    [[ $ok == 1 ]] || { echo "✗ $t: page $i failed 5 times, nothing loaded (pages kept in $dir)"; return 1; }
   done
   {
     echo "begin;"
-    for i in "${!parts[@]}"; do echo "\\copy $SCHEMA.$t ($c) from '$TMP/$t.$i'"; done
+    for i in "${!parts[@]}"; do echo "\\copy $SCHEMA.$t ($c) from '$dir/$i.copy'"; done
     echo "commit;"
-  } | dst -q
-  rm -f "$TMP/$t".*
+  } | dst -q || { echo "✗ $t: load rejected, nothing committed (pages kept in $dir)"; return 1; }
+  rm -rf "$dir"
 }
 
 cmd_full() {
@@ -170,17 +198,32 @@ cmd_refresh() {
 }
 
 cmd_verify() {
-  local bad=0
-  printf '%-22s %10s %10s  %s\n' table src dst result
+  # VERIFY_FAST=1 verify <since>: inside the freeze, table_job_batches' `rows`
+  # (264 MB of TOAST Supabase serves at ~200 KB/s) is hashed only for rows
+  # updated since <since>; every other column of every row is still hashed.
+  # Sound because its only writer is Prisma, whose @updatedAt moves on every
+  # update, and the full hash of the older rows was proven before the freeze.
+  local bad=0 fast=${VERIFY_FAST:-0} since=${1:-}
+  [[ $fast == 1 && -z $since ]] && { echo "VERIFY_FAST=1 needs: verify <since>"; return 2; }
+  printf '%-30s %10s %10s  %s\n' table src dst result
+  _check() { # label, columns, pk, table, where
+    local q a b r
+    q="select count(*)||' '||coalesce(md5(string_agg(md5(row($2)::text), '' order by $3)), '-') from"
+    a=$(src -c "$q $SRC_SCHEMA.$4 where $5")
+    b=$(dst -c "$q $SCHEMA.$4 where $5")
+    if [[ "$a" == "$b" ]]; then r="ok"; else r="DIFF"; bad=1; fi
+    printf '%-30s %10s %10s  %s\n' "$1" "${a%% *}" "${b%% *}" "$r"
+  }
   for spec in "${TABLES[@]}"; do
     IFS='|' read -r t pk _ _ <<<"$spec"
-    local c q a b
+    local c
     c=$(cols "$t")
-    q="select count(*)||' '||coalesce(md5(string_agg(md5(row($c)::text), '' order by $pk)), '-') from"
-    a=$(src -c "$q $SRC_SCHEMA.$t")
-    b=$(dst -c "$q $SCHEMA.$t")
-    if [[ "$a" == "$b" ]]; then r="ok"; else r="DIFF"; bad=1; fi
-    printf '%-22s %10s %10s  %s\n' "$t" "${a%% *}" "${b%% *}" "$r"
+    if [[ $fast == 1 && $t == table_job_batches ]]; then
+      _check "$t (sin rows)" "$(sed -E 's/(^|,)rows(,|$)/\1\2/; s/,,/,/; s/^,|,$//g' <<<"$c")" "$pk" "$t" "true"
+      _check "$t (rows, upd>=since)" "$c" "$pk" "$t" "updated_at >= '$since'"
+    else
+      _check "$t" "$c" "$pk" "$t" "true"
+    fi
   done
   return $bad
 }
@@ -189,6 +232,6 @@ case "${1:-}" in
   full) cmd_full ;;
   delta) cmd_delta "${2:-}" ;;
   refresh) cmd_refresh "${2:-}" ;;
-  verify) cmd_verify ;;
+  verify) cmd_verify "${2:-}" ;;
   *) sed -n '2,20p' "$0"; exit 2 ;;
 esac
