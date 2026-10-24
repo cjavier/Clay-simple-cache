@@ -237,7 +237,7 @@ async function smoke() {
     r.status !== 404 ? "not 404" : null
   );
 
-  console.log(`  synthetic rows: emails ${email}, ${email2} (domain ${domain}) — delete with the cleanup SQL in README-migration.md`);
+  console.log(`  synthetic rows: emails ${email}, ${email2} (domain ${domain}) — delete with scripts/migration/cleanup-e2e.sql`);
 }
 
 const t0 = Date.now();

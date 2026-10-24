@@ -6,11 +6,19 @@ import { findJobService } from './services/find-job.service';
 import { tableJobService } from './services/table-job.service';
 import { tableBuildService } from './services/table-build.service';
 import { startEvidenceSweeper } from './services/evidence-push.service';
+import { cutoverMode } from './cutover';
 
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
+    // Cutover (maintenance or proxy): the data now lives in sistema-outbound,
+    // so nothing here may touch the database. No loops at all.
+    const cutover = cutoverMode();
+    if (cutover) {
+        console.log(`[cutover] CUTOVER_MODE=${cutover}${cutover === 'proxy' ? ` → ${process.env.PROXY_TARGET}` : ''}: background jobs off`);
+        return;
+    }
     // Daily provider-balance check. Runs in-process because this service is
     // already up 24/7 and a separate Railway cron service silently stopped
     // firing after its first run.

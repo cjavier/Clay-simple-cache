@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "npx prisma generate && npx prisma db push && nodemon src/index.ts",
     "build": "tsc",
-    "start": "npx prisma generate && npx prisma migrate deploy && node dist/index.js",
+    "start": "npx prisma generate && ([ -n \"$CUTOVER_MODE\" ] || npx prisma migrate deploy) && node dist/index.js",
     "prisma:generate": "prisma generate",
     "prisma:push": "prisma db push",
     "prisma:studio": "prisma studio",

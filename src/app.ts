@@ -2,12 +2,21 @@ import express from 'express';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
 import router from './routes';
+import { cutoverMode, maintenanceHandler, proxyHandler } from './cutover';
 
 const app = express();
 // Railway puts one proxy in front of us. Without this every request looks like
 // it comes from the proxy, so all callers (Clay, MailBridge, scripts) shared a
 // single rate-limit bucket, and express-rate-limit logged ERR_ERL_UNEXPECTED_X_FORWARDED_FOR.
 app.set('trust proxy', 1);
+
+// Cutover to sistema-outbound (see cutover.ts). Health answers here in both modes.
+const cutover = cutoverMode();
+if (cutover) {
+    app.get('/health', (_req, res) => res.send('OK'));
+    if (cutover === 'maintenance') app.use(maintenanceHandler);
+    if (cutover === 'proxy' && !process.env.PROXY_TARGET) throw new Error('CUTOVER_MODE=proxy needs PROXY_TARGET');
+}
 
 // CORS: restrict to ALLOWED_ORIGINS (comma-separated) when configured; otherwise
 // keep the current open behavior so existing server-side integrations don't break.
@@ -31,6 +40,8 @@ const jsonSigned = express.json({
     },
 });
 app.use((req, res, next) => {
+    // The proxy relays the raw body untouched: nothing may consume the stream.
+    if (cutover === 'proxy') return next();
     if (req.path === '/webhooks/mailbridge') return jsonSigned(req, res, next);
     return (/^\/tables\/[^/]+\/rows$/.test(req.path) ? jsonLarge : jsonSmall)(req, res, next);
 });
@@ -70,6 +81,9 @@ const lookupLimiter = rateLimit({
 app.use('/emails/lookup', lookupLimiter);
 app.use((req, res, next) => (req.path === '/emails/lookup' ? next() : globalLimiter(req, res, next)));
 app.use(COSTLY_PATHS, costlyLimiter);
+
+// Rate limits above still count each real caller; the target then sees them all from this proxy.
+if (cutover === 'proxy') app.use(proxyHandler(process.env.PROXY_TARGET as string));
 
 app.use(router);
 
