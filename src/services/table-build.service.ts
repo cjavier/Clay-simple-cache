@@ -41,6 +41,12 @@ export interface BuildConfig {
   /** Stop after this many people (default: no cap). Cuts inside the last chunk; companies left without people are not sent. */
   max_people?: number | null;
   find_emails: boolean;
+  /**
+   * Re-walking a build cut short (e.g. a legacy one stopped at ~25k): companies whose row this job
+   * already queued are dropped before the people search (~34 Blitz records each); listing them costs
+   * 1. Same job, so the same MailBridge tables. Opt-in: a normal resume must redo its chunk in flight.
+   */
+  skip_sent_companies?: boolean;
   /** contacts/month × months, to judge coverage like the skill does. */
   needed?: number | null;
 }
@@ -83,6 +89,8 @@ export interface BuildState {
   emails_cache_unverified?: number;
   /** Nobody free had them: left for MailBridge's Prospeo / Findymail columns. */
   emails_not_found?: number;
+  /** Companies dropped by `skip_sent_companies`: this job had already queued them. */
+  companies_skipped?: number;
   /** Legacy fields of builds made while the cache paid for emails (kept for old jobs' summaries). */
   email_spend_usd?: number;
   started_at?: string;
@@ -241,14 +249,23 @@ export async function run(jobId: string, deps?: BuildEmailDeps, opts: { searchCa
       Object.assign(state, { companies: 0, people: 0, emails_valid: 0, emails_searched: 0, chunks: 0, cursor: null });
     }
     if (!state.segments) {
-      // A build started before segments existed resumes its one search where its cursor was.
-      const legacy = Boolean(state.cursor) || (state.companies || 0) > 0;
+      // A build started before segments existed resumes its one search where its cursor was. Without a
+      // cursor it is planned afresh, keeping its counters: that is how a build is continued with a
+      // narrower filter (e.g. `employee_count.max` = where a legacy search stopped).
+      const legacy = Boolean(state.cursor);
       const plan = legacy
         ? { segments: [{ filter: cfg.company, total: state.companies_total ?? 0, legacy_page_size: LEGACY_PAGE_SIZE }], uncovered: 0, warning: null }
-        : await planSegments(bz, cfg.company, state.companies_total ?? 0, opts.searchCap);
+        : await planSegments(
+            bz,
+            cfg.company,
+            // A continuation counts its own filter; companies_total stays the TAM the build started with.
+            (state.companies || 0) > 0 ? await bz.countCompanies(cfg.company) : state.companies_total ?? 0,
+            opts.searchCap,
+          );
       Object.assign(state, { segments: plan.segments, segment: 0, uncovered: plan.uncovered, segment_warning: plan.warning });
     }
     await save(jobId, { ...state, records_used: used() }, { build_status: "running", build_error: null });
+    const sent = cfg.skip_sent_companies ? await tableJobService.sentRefs(jobId, "companies") : null;
 
     for (;;) {
       const room = (cfg.max_companies ?? Infinity) - (state.companies || 0);
@@ -264,6 +281,11 @@ export async function run(jobId: string, deps?: BuildEmailDeps, opts: { searchCa
       const cursor = r.cursor;
       const companies = new Map<string, any>();
       for (const c of page) {
+        // The ref MailBridge upserts by, computed as the row would be (one definition: rowRef).
+        if (sent?.has(rowRef("companies", companyRow(c, 0, 0)))) {
+          state.companies_skipped = (state.companies_skipped || 0) + 1;
+          continue;
+        }
         const li = normLi(c?.linkedin_url);
         if (!companies.has(li)) companies.set(li, c);
       }

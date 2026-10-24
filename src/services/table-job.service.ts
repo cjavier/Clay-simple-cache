@@ -117,6 +117,16 @@ export const tableJobService = {
     return created.map((b) => b.id);
   },
 
+  /** Refs of every row this job already queued for a kind (sent or not): what a re-walk skips. */
+  async sentRefs(jobId: string, kind: TableKind): Promise<Set<string>> {
+    const rows = await prisma.$queryRaw<Array<{ ref: string | null }>>`
+      SELECT r->>'ref' AS ref
+      FROM table_job_batches b, jsonb_array_elements(b.rows) AS r
+      WHERE b.job_id = ${jobId}::uuid AND b.kind = ${kind}
+    `;
+    return new Set(rows.map((r) => r.ref).filter((ref): ref is string => Boolean(ref)));
+  },
+
   /** Per kind: rows received, delivered, pending and failed, plus the job status. */
   async status(jobId: string) {
     const groups = await prisma.tableJobBatch.groupBy({

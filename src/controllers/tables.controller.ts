@@ -16,6 +16,7 @@ export function parseBuild(b: unknown): BuildConfig | string {
   if (b.max_companies !== undefined && b.max_companies !== null && (!Number.isInteger(b.max_companies) || (b.max_companies as number) < 1)) return "build.max_companies must be a positive integer";
   if (b.max_people !== undefined && b.max_people !== null && (!Number.isInteger(b.max_people) || (b.max_people as number) < 1)) return "build.max_people must be a positive integer";
   if (b.find_emails !== undefined && typeof b.find_emails !== "boolean") return "build.find_emails must be boolean";
+  if (b.skip_sent_companies !== undefined && typeof b.skip_sent_companies !== "boolean") return "build.skip_sent_companies must be boolean";
   // The build no longer pays for emails (cache + Blitz only): the old knobs are rejected, not silently ignored.
   if (b.email_budget_usd !== undefined || b.email_policy !== undefined) {
     return "build.email_budget_usd / build.email_policy were removed: the build only uses the cache and Blitz (free); paid search and verification run in the MailBridge table's email columns";
@@ -28,6 +29,7 @@ export function parseBuild(b: unknown): BuildConfig | string {
     max_companies: (b.max_companies as number | null | undefined) ?? null,
     ...(b.max_people ? { max_people: b.max_people as number } : {}),
     find_emails: b.find_emails !== false,
+    ...(b.skip_sent_companies === true ? { skip_sent_companies: true } : {}),
     needed: monthly ? monthly * months : null,
   };
 }

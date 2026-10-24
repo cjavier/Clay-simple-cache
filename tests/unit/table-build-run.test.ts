@@ -49,8 +49,12 @@ vi.mock("../../src/db/prisma", () => ({
   },
 }));
 const enqueued: Array<{ kind: string; n: number }> = [];
+const sentRefs: string[] = [];
 vi.mock("../../src/services/table-job.service", () => ({
-  tableJobService: { enqueue: vi.fn(async (_id: string, kind: string, rows: unknown[]) => { enqueued.push({ kind, n: rows.length }); return []; }) },
+  tableJobService: {
+    enqueue: vi.fn(async (_id: string, kind: string, rows: any[]) => { enqueued.push({ kind, n: rows.length }); sentRefs.push(...rows.filter(() => kind === "companies").map((r) => r.ref)); return []; }),
+    sentRefs: vi.fn(async () => new Set(sentRefs)),
+  },
 }));
 
 import { run, buildSummary, freeEmail, planSegments, BuildEmailDeps } from "../../src/services/table-build.service";
@@ -72,7 +76,7 @@ let d: ReturnType<typeof deps>;
 const runJob = (id: string) => run(id, d);
 
 beforeEach(() => {
-  calls.pages = []; calls.filters = []; calls.emails = 0; calls.failAtPage = -1; enqueued.length = 0;
+  calls.pages = []; calls.filters = []; calls.emails = 0; calls.failAtPage = -1; enqueued.length = 0; sentRefs.length = 0;
   d = deps();
   job = { id: "j1", build_status: "queued", build_state: {}, build: { company: { x: 1 }, people: {}, max_companies: null, find_emails: true, needed: 100 } };
 });
@@ -135,6 +139,36 @@ describe("background Blitz build", () => {
     expect(calls.pages).toEqual(["25", "50"]);
     expect(calls.filters.every((f) => f === job.build.company)).toBe(true);
     expect(job.build_state).toMatchObject({ companies: 75, segments: [{ total: 75, legacy_page_size: 25 }] });
+  });
+
+  it("a build continued with a narrower filter and no cursor is planned afresh, keeping its counters", async () => {
+    job.build_status = "queued";
+    job.build.company = { employee_count: { max: 30 } };
+    job.build_state = { companies_total: 75, people_total: 150, companies: 44, people: 88, emails_valid: 44, emails_searched: 88, chunks: 2, cursor: null };
+    await run("j1", d, { searchCap: 20 });
+    expect(job.build_status).toBe("done");
+    const segments = job.build_state.segments as Array<{ filter: any; total: number; legacy_page_size?: number }>;
+    expect(segments.reduce((sum, x) => sum + x.total, 0)).toBe(31); // employees 0..30
+    expect(segments.every((x) => x.legacy_page_size === undefined && x.filter.employee_count.max <= 30)).toBe(true);
+    expect(job.build_state.companies).toBe(44 + 31);
+  });
+
+  it("re-walking a cut build with skip_sent_companies pays the people search only for companies not queued before", async () => {
+    // A legacy walk stopped after 40 companies (pages of 25), as Blitz's page limit did at ~25k.
+    job.build.max_companies = 40;
+    await runJob("j1");
+    expect(job.build_state.companies).toBe(40);
+    const emailsBefore = calls.emails;
+    // Re-walk the same job, no cap, no cursor, skipping what it already queued.
+    Object.assign(job.build, { max_companies: null, skip_sent_companies: true });
+    job.build_status = "queued";
+    job.build_state = { ...job.build_state, cursor: null, segments: undefined };
+    enqueued.length = 0;
+    await run("j1", d, { searchCap: 20 });
+    expect(job.build_status).toBe("done");
+    expect(job.build_state).toMatchObject({ companies_skipped: 40, companies: 75 });
+    expect(calls.emails - emailsBefore).toBe(35 * 2);
+    expect(enqueued.filter((e) => e.kind === "companies").reduce((s, e) => s + e.n, 0)).toBe(35);
   });
 
   it("a split resumes inside its current search after a failure", async () => {

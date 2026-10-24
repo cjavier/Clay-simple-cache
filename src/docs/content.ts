@@ -875,6 +875,7 @@ Tables are named \`<campaign> — Empresas <niche>\` and \`<campaign> — Person
 | \`build.max_companies\` | int | No | Default: the whole TAM, no cap. One Blitz search stops at 50,000 companies, so a bigger TAM is split into several searches by \`employee_count\` and walked one after the other (\`build.searches\` in \`GET /tables/:id\`). |
 | \`build.max_people\` | int | No | Stop after this many people (cuts inside the last batch of companies; companies left without people are not sent). Default: no cap. |
 | \`build.find_emails\` | bool | No | Default \`true\`. |
+| \`build.skip_sent_companies\` | bool | No | Re-walking a job cut short: companies this job already queued are listed (1 Blitz record) but their people are not searched again. Default \`false\`. |
 | \`build.monthly\`, \`build.months\` | int | No | Contracted volume, for the coverage verdict. |
 
 Requires \`BLITZAPI_KEY\` on the server. The response's \`status\` is \`building\`; \`GET /tables/:id\` adds a \`build\` block: \`status\` (\`queued\`/\`running\`/\`done\`/\`failed\`), \`tam\` (Blitz counts), \`progress\`, \`searches\` (\`count\`, \`current\`, \`uncovered\`: companies no search can reach, \`warning\`), \`coverage\` (\`email_rate\`, \`reachable_estimate\`, \`verdict\`), \`records_used\`, and \`emails\` (\`from_cache\`, \`cache_unverified\`, \`by_source\`, \`not_found\`, \`next_step\`). \`build.email_budget_usd\` and \`build.email_policy\` were removed (\`400\`): the build pays nothing.
