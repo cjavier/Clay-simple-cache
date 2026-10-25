@@ -69,7 +69,13 @@ if [[ -n ${ONLY:-} ]]; then
 fi
 
 src() { psql "$SRC_URL" -X -v ON_ERROR_STOP=1 -At -c "set statement_timeout = 0" -c "set timezone = 'UTC'" -c "set extra_float_digits = 1" "$@" | sed "/^SET$/d"; }
-dst() { psql "$DST_URL" -X -v ON_ERROR_STOP=1 -At "$@"; }  # no pooler: PGOPTIONS applies; stdin stays free for delta
+# Session settings go in by SET, never PGOPTIONS alone: Supabase's pooler drops
+# PGOPTIONS (rollback points dst at it). Scripts piped in run after them via -f -.
+dst() {
+  local sets=(-c "set timezone = 'UTC'" -c "set extra_float_digits = 1")
+  if [[ " $* " == *" -c "* ]]; then psql "$DST_URL" -X -v ON_ERROR_STOP=1 -At "${sets[@]}" "$@" | sed "/^SET$/d"
+  else psql "$DST_URL" -X -v ON_ERROR_STOP=1 -At "${sets[@]}" -f - "$@" | sed "/^SET$/d"; fi
+}
 
 cols() { # column list of public.$1 at the source, in source order
   src -c "select string_agg(quote_ident(column_name), ',' order by ordinal_position)
