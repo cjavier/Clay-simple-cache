@@ -10,6 +10,8 @@
 #   SRC_URL=… DST_URL=… copy-data.sh verify                         # count + md5 per table
 #   ONLY=profiles,search_log … full|delta|verify   # a subset, still in FK order
 #   PARALLEL=4 … full|refresh                        # pages read 4 at a time
+#   SRC_URL=… DST_URL=… copy-data.sh repair   # upsert only rows whose hash differs (never deletes)
+#   CLASSIFY_SINCE=<ts> … repair               # also split them: written since <ts> vs older
 #   VERIFY_FAST=1 … verify <since>   # freeze: table_job_batches.rows hashed only where updated since
 #   SRC_URL=… DST_URL=… copy-data.sh refresh <table>                # re-copy one table whole
 #
@@ -26,7 +28,7 @@ SCHEMA="${DST_SCHEMA:-clay_cache}"
 SRC_SCHEMA="${SRC_SCHEMA:-public}"  # clay_cache when the source is a copy already loaded
 # Supabase's postgres role has a statement_timeout that cuts a big COPY short;
 # its pooler ignores PGOPTIONS, so src() also sets it in the session.
-export PGTZ=UTC PGOPTIONS="-c TimeZone=UTC -c statement_timeout=0"
+export PGTZ=UTC PGOPTIONS="-c TimeZone=UTC -c statement_timeout=0 -c extra_float_digits=1"
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 # Page cache of copy_table (holds row data: keep it private, it is removed per table on success).
 CACHE_DIR="${CACHE_DIR:-${TMPDIR:-/tmp}/clay-copy-cache}"
@@ -66,7 +68,7 @@ if [[ -n ${ONLY:-} ]]; then
   TABLES=("${_keep[@]}")
 fi
 
-src() { psql "$SRC_URL" -X -v ON_ERROR_STOP=1 -At -c "set statement_timeout = 0" -c "set timezone = 'UTC'" "$@" | sed "/^SET$/d"; }
+src() { psql "$SRC_URL" -X -v ON_ERROR_STOP=1 -At -c "set statement_timeout = 0" -c "set timezone = 'UTC'" -c "set extra_float_digits = 1" "$@" | sed "/^SET$/d"; }
 dst() { psql "$DST_URL" -X -v ON_ERROR_STOP=1 -At "$@"; }  # no pooler: PGOPTIONS applies; stdin stays free for delta
 
 cols() { # column list of public.$1 at the source, in source order
@@ -124,7 +126,7 @@ fetch_pages() { # $1 table, $2 row filter, $3 cache key → pages in $PAGES_DIR,
     if ! printf '%s\n' "${missing[@]}" | xargs -P "${PARALLEL:-1}" -I{} bash -c '
         i=$1; cond=$(sed -n "$((i + 1))p" "$_DIR/plan")
         for try in 1 2 3 4 5; do
-          if psql "$SRC_URL" -X -q -v ON_ERROR_STOP=1 -c "set statement_timeout = 0" -c "set timezone = '"'"'UTC'"'"'" \
+          if psql "$SRC_URL" -X -q -v ON_ERROR_STOP=1 -c "set statement_timeout = 0" -c "set timezone = '"'"'UTC'"'"'" -c "set extra_float_digits = 1" \
                -c "\\copy (select $_COLS from $SRC_SCHEMA.$_TBL where $cond) to '"'"'$_DIR/$i.part'"'"'" >/dev/null; then
             mv "$_DIR/$i.part" "$_DIR/$i.copy"; exit 0
           fi
@@ -227,6 +229,51 @@ cmd_refresh() {
   echo "✓ $t refreshed: $(dst -c "select count(*) from $SCHEMA.$t") rows"
 }
 
+cmd_repair() {
+  # Row-by-row comparison by hash (pk, md5(row)) on both sides, then only the
+  # rows that differ or are missing at the target are fetched and upserted, in
+  # chunks of 2000 keys. Never deletes. Safe while the source still writes.
+  for spec in "${TABLES[@]}"; do
+    IFS='|' read -r t pk ts _ <<<"$spec"
+    local c k set q nd f chunk newer=0
+    c=$(cols "$t"); k="row($pk)::text"
+    set=$(src -c "select string_agg(quote_ident(column_name)||'=excluded.'||quote_ident(column_name), ',')
+                  from information_schema.columns where table_schema='$SRC_SCHEMA' and table_name='$t'
+                  and column_name <> all(string_to_array('$pk', ','))")
+    q="select $k, md5(row($c)::text) from"
+    src -c "\\copy ($q $SRC_SCHEMA.$t) to '$TMP/$t.hs'"
+    dst -c "\\copy ($q $SCHEMA.$t) to '$TMP/$t.hd'"
+    sort "$TMP/$t.hs" > "$TMP/$t.hs.s"; sort "$TMP/$t.hd" > "$TMP/$t.hd.s"
+    comm -23 "$TMP/$t.hs.s" "$TMP/$t.hd.s" | cut -f1 > "$TMP/$t.ids"
+    nd=$(wc -l < "$TMP/$t.ids" | tr -d ' ')
+    if [[ $nd == 0 ]]; then echo "  $t: 0 rows differ"; continue; fi
+    split -l 2000 "$TMP/$t.ids" "$TMP/$t.chunk."
+    if [[ -n ${CLASSIFY_SINCE:-} ]]; then
+      # Written at the source after CLASSIFY_SINCE (new writes) vs older (representation, e.g. floats).
+      local g; g="greatest($(sed -E 's/([a-z_]+)/coalesce(\1, '"'"'-infinity'"'"')/g' <<<"$ts"))"
+      for chunk in "$TMP/$t.chunk."*; do
+        newer=$((newer + $(src -c "select count(*) from $SRC_SCHEMA.$t where $k in ($(sed "s/'/''/g; s/.*/'&'/" "$chunk" | paste -sd, -)) and $g >= '$CLASSIFY_SINCE'")))
+      done
+      echo "  $t: $nd rows differ or are missing — $newer written at the source since $CLASSIFY_SINCE, $((nd - newer)) older"
+    else
+      echo "  $t: $nd rows differ or are missing"
+    fi
+    for chunk in "$TMP/$t.chunk."*; do
+      f="$k in ($(sed "s/'/''/g; s/.*/'&'/" "$chunk" | paste -sd, -))"
+      fetch_pages "$t" "$f" "repair|$f" || return 1
+      {
+        echo "begin;"
+        echo "create temp table _d (like $SCHEMA.$t including defaults) on commit drop;"
+        local pf; for pf in "${PAGES[@]}"; do echo "\\copy _d ($c) from '$pf'"; done
+        echo "insert into $SCHEMA.$t ($c) select $c from _d on conflict ($pk) do update set $set;"
+        echo "select 'upserted', count(*) from _d;"
+        echo "commit;"
+      } | dst -q | sed "s/^/  $t: /" || { echo "✗ $t: repair rejected (pages kept in $PAGES_DIR)"; return 1; }
+      rm -rf "$PAGES_DIR"
+    done
+  done
+}
+
 cmd_verify() {
   # VERIFY_FAST=1 verify <since>: inside the freeze, table_job_batches' `rows`
   # (264 MB of TOAST Supabase serves at ~200 KB/s) is hashed only for rows
@@ -238,9 +285,11 @@ cmd_verify() {
   printf '%-30s %10s %10s  %s  %s %s\n' table src dst result md5_src md5_dst
   _check() { # label, columns, pk, table, where
     local q a b r
-    q="select count(*)||' '||coalesce(md5(string_agg(md5(row($2)::text), '' order by $3)), '-') from"
-    a=$(src -c "$q $SRC_SCHEMA.$4 where $5")
-    b=$(dst -c "$q $SCHEMA.$4 where $5")
+    # Ordered by each row's own hash, not by the pk: text pks sort by the
+    # database collation, which differs between Supabase and Railway.
+    q="select count(*)||' '||coalesce(md5(string_agg(h, '' order by h)), '-') from (select md5(row($2)::text) h from"
+    a=$(src -c "$q $SRC_SCHEMA.$4 where $5) s")
+    b=$(dst -c "$q $SCHEMA.$4 where $5) s")
     if [[ "$a" == "$b" ]]; then r="ok"; else r="DIFF"; bad=1; fi
     printf '%-30s %10s %10s  %s  %s %s\n' "$1" "${a%% *}" "${b%% *}" "$r" "${a##* }" "${b##* }"
   }
@@ -263,5 +312,6 @@ case "${1:-}" in
   delta) cmd_delta "${2:-}" ;;
   refresh) cmd_refresh "${2:-}" ;;
   verify) cmd_verify "${2:-}" ;;
+  repair) cmd_repair ;;
   *) sed -n '2,20p' "$0"; exit 2 ;;
 esac
