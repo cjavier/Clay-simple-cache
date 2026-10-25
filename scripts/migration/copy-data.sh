@@ -9,6 +9,7 @@
 #   DELETE_GONE=1 … delta <since>   # also delete target keys gone at the source (freeze only)
 #   SRC_URL=… DST_URL=… copy-data.sh verify                         # count + md5 per table
 #   ONLY=profiles,search_log … full|delta|verify   # a subset, still in FK order
+#   PARALLEL=4 … full|refresh                        # pages read 4 at a time
 #   VERIFY_FAST=1 … verify <since>   # freeze: table_job_batches.rows hashed only where updated since
 #   SRC_URL=… DST_URL=… copy-data.sh refresh <table>                # re-copy one table whole
 #
@@ -83,22 +84,20 @@ check_target_columns() { # every source column must exist at the target
   fi
 }
 
-copy_table() { # $1 table
+fetch_pages() { # $1 table, $2 row filter, $3 cache key → pages in $PAGES_DIR, plan order in PAGES[]
   # Through files, never a pipe: a source read that dies halfway would still
   # end the target's COPY cleanly and commit the rows it got. Tables with an
-  # `id` are read in pages of PAGE rows by id range, each page retried: the
-  # Supabase pooler drops any session that streams for minutes, and the Free
-  # instance serves table_job_batches' jsonb at ~200 KB/s. The load is one
-  # target transaction, so a table lands whole or not at all.
+  # `id` are read in pages of PAGE rows by id range, each page retried and
+  # PARALLEL at a time: the Supabase pooler drops sessions that stream for
+  # minutes, and the Free instance serves table_job_batches' jsonb slowly.
   #
-  # Pages and their plan live in $CACHE_DIR until the load commits: a rejected
-  # load (say, an FK) reruns from disk instead of paying the source read again.
-  # A page is only kept once complete (written to .part, then renamed). Rows
-  # the source gains after the plan was made are the delta's job.
-  local t=$1 c parts=() i prev="" b dir
+  # Pages and their plan live in $CACHE_DIR until the caller's load commits: a
+  # rejected load (say, an FK) reruns from disk instead of paying the source
+  # read again. A page is only kept once complete (.part, then renamed).
+  local t=$1 filter=$2 key=$3 c parts=() i prev="" b dir
   local page=${PAGE:-20000}
   [[ $t == table_job_batches ]] && page=${PAGE_BATCHES:-150}
-  dir="$CACHE_DIR/$(printf '%s|%s' "$SRC_URL" "$SRC_SCHEMA" | shasum | cut -c1-10)/$t"
+  dir="$CACHE_DIR/$(printf '%s|%s' "$SRC_URL" "$SRC_SCHEMA" | shasum | cut -c1-10)/$t${key:+.$(printf '%s' "$key" | shasum | cut -c1-8)}"
   mkdir -p "$dir"; chmod 700 "$CACHE_DIR"
   c=$(cols "$t")
   if [[ -s "$dir/plan" ]]; then
@@ -109,30 +108,45 @@ copy_table() { # $1 table
       # Page boundaries from the ids alone (index-only, cheap).
       while read -r b; do
         parts+=("${prev:+id > '$prev' and }id <= '$b'"); prev=$b
-      done < <(src -c "select id from (select id, row_number() over (order by id) rn from $SRC_SCHEMA.$t) s where rn % $page = 0 order by id")
+      done < <(src -c "select id from (select id, row_number() over (order by id) rn from $SRC_SCHEMA.$t where $filter) s where rn % $page = 0 order by id")
       parts+=("${prev:+id > '$prev'}"); [[ -z "$prev" ]] && parts[${#parts[@]}-1]="true"
     else
       parts=("true")
     fi
+    local k; for k in "${!parts[@]}"; do parts[$k]="(${parts[$k]}) and ($filter)"; done
     printf '%s\n' "${parts[@]}" > "$dir/plan"
   fi
-  for i in "${!parts[@]}"; do
-    [[ -f "$dir/$i.copy" ]] && continue
-    local ok=0 try
-    for try in 1 2 3 4 5; do
-      if src -c "\\copy (select $c from $SRC_SCHEMA.$t where ${parts[$i]}) to '$dir/$i.part'"; then
-        mv "$dir/$i.part" "$dir/$i.copy"; ok=1; break
-      fi
-      echo "  $t page $i: retry $try" >&2; sleep $((try * 5))
-    done
-    [[ $ok == 1 ]] || { echo "✗ $t: page $i failed 5 times, nothing loaded (pages kept in $dir)"; return 1; }
-  done
+  local missing=()
+  for i in "${!parts[@]}"; do [[ -f "$dir/$i.copy" ]] || missing+=("$i"); done
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    # bash 3.2 has no `wait -n`, so xargs -P does the pacing.
+    export _DIR="$dir" _COLS="$c" _TBL="$t" SRC_URL SRC_SCHEMA
+    if ! printf '%s\n' "${missing[@]}" | xargs -P "${PARALLEL:-1}" -I{} bash -c '
+        i=$1; cond=$(sed -n "$((i + 1))p" "$_DIR/plan")
+        for try in 1 2 3 4 5; do
+          if psql "$SRC_URL" -X -q -v ON_ERROR_STOP=1 -c "set statement_timeout = 0" -c "set timezone = '"'"'UTC'"'"'" \
+               -c "\\copy (select $_COLS from $SRC_SCHEMA.$_TBL where $cond) to '"'"'$_DIR/$i.part'"'"'" >/dev/null; then
+            mv "$_DIR/$i.part" "$_DIR/$i.copy"; exit 0
+          fi
+          echo "  $_TBL page $i: retry $try" >&2; sleep $((try * 5))
+        done
+        exit 1' _ {}; then
+      echo "✗ $t: some page failed 5 times, nothing loaded (pages kept in $dir)"; return 1
+    fi
+  fi
+  PAGES_DIR=$dir; PAGES=(); for i in "${!parts[@]}"; do PAGES+=("$dir/$i.copy"); done
+}
+
+copy_table() { # $1 table: the whole table, one target transaction (lands whole or not at all)
+  local t=$1 c f
+  c=$(cols "$t")
+  fetch_pages "$t" "true" "" || return 1
   {
     echo "begin;"
-    for i in "${!parts[@]}"; do echo "\\copy $SCHEMA.$t ($c) from '$dir/$i.copy'"; done
+    for f in "${PAGES[@]}"; do echo "\\copy $SCHEMA.$t ($c) from '$f'"; done
     echo "commit;"
-  } | dst -q || { echo "✗ $t: load rejected, nothing committed (pages kept in $dir)"; return 1; }
-  rm -rf "$dir"
+  } | dst -q || { echo "✗ $t: load rejected, nothing committed (pages kept in $PAGES_DIR)"; return 1; }
+  rm -rf "$PAGES_DIR"
 }
 
 cmd_full() {
@@ -156,26 +170,42 @@ cmd_delta() {
   local since=${1:?delta needs a since timestamp (ISO 8601)}
   for spec in "${TABLES[@]}"; do
     IFS='|' read -r t pk ts mode <<<"$spec"
-    local c newest set
+    local c newest set f
     c=$(cols "$t")
     newest="greatest($(sed -E 's/([a-z_]+)/coalesce(\1, '"'"'-infinity'"'"')/g' <<<"$ts")) >= '$since'"
     [[ $mode == delta+unpushed ]] && newest="($newest or pushed_at is null)"
-    # No reliable signal: upsert every row (no truncate: FK parents, no empty window).
-    [[ $mode == refresh ]] && newest="true"
+    # No reliable signal: compare a hash per row on both sides (a few MB, not the
+    # table) and fetch only the rows that differ or are missing at the target.
+    # No truncate: FK parents, no empty window.
+    if [[ $mode == refresh ]]; then
+      local q="select $pk::text, md5(row($c)::text) from"
+      src -c "\\copy ($q $SRC_SCHEMA.$t) to '$TMP/$t.hs'"
+      dst -c "\\copy ($q $SCHEMA.$t) to '$TMP/$t.hd'"
+      sort "$TMP/$t.hs" > "$TMP/$t.hs.s"; sort "$TMP/$t.hd" > "$TMP/$t.hd.s"
+      comm -23 "$TMP/$t.hs.s" "$TMP/$t.hd.s" | cut -f1 > "$TMP/$t.ids"
+      local nd; nd=$(wc -l < "$TMP/$t.ids" | tr -d ' ')
+      if [[ $nd == 0 ]]; then echo "  $t: upserted|0 (hashes equal)"; continue; fi
+      if [[ $nd -le 5000 ]]; then
+        newest="$pk::text in ($(sed "s/'/''/g; s/.*/'&'/" "$TMP/$t.ids" | paste -sd, -))"
+      else
+        newest="true"
+      fi
+    fi
     set=$(src -c "select string_agg(quote_ident(column_name)||'=excluded.'||quote_ident(column_name), ',')
                   from information_schema.columns where table_schema='$SRC_SCHEMA' and table_name='$t'
                   and column_name <> all(string_to_array('$pk', ','))")
-    # Changed rows → file → temp table → upsert, in one target transaction.
-    src -c "\\copy (select $c from $SRC_SCHEMA.$t where $newest) to '$TMP/$t.d'"
+    # Changed rows → paged files → temp table → upsert, in one target transaction.
+    fetch_pages "$t" "$newest" "delta|$newest" || return 1
     [[ ${DELETE_GONE:-0} == 1 ]] && src -c "\\copy (select $pk from $SRC_SCHEMA.$t) to '$TMP/$t.k'"
     {
       echo "begin;"
       echo "create temp table _d (like $SCHEMA.$t including defaults) on commit drop;"
-      echo "\\copy _d ($c) from '$TMP/$t.d'"
+      for f in "${PAGES[@]}"; do echo "\\copy _d ($c) from '$f'"; done
       echo "insert into $SCHEMA.$t ($c) select $c from _d on conflict ($pk) do update set $set;"
       echo "select 'upserted', count(*) from _d;"
       echo "commit;"
-    } | dst -q | sed "s/^/  $t: /"
+    } | dst -q | sed "s/^/  $t: /" || { echo "✗ $t: delta rejected, nothing committed (pages kept in $PAGES_DIR)"; return 1; }
+    rm -rf "$PAGES_DIR"
     # Keys gone at the source: only inside the freeze (old service stopped),
     # never while it still writes.
     [[ ${DELETE_GONE:-0} == 1 ]] || continue
@@ -205,14 +235,14 @@ cmd_verify() {
   # update, and the full hash of the older rows was proven before the freeze.
   local bad=0 fast=${VERIFY_FAST:-0} since=${1:-}
   [[ $fast == 1 && -z $since ]] && { echo "VERIFY_FAST=1 needs: verify <since>"; return 2; }
-  printf '%-30s %10s %10s  %s\n' table src dst result
+  printf '%-30s %10s %10s  %s  %s %s\n' table src dst result md5_src md5_dst
   _check() { # label, columns, pk, table, where
     local q a b r
     q="select count(*)||' '||coalesce(md5(string_agg(md5(row($2)::text), '' order by $3)), '-') from"
     a=$(src -c "$q $SRC_SCHEMA.$4 where $5")
     b=$(dst -c "$q $SCHEMA.$4 where $5")
     if [[ "$a" == "$b" ]]; then r="ok"; else r="DIFF"; bad=1; fi
-    printf '%-30s %10s %10s  %s\n' "$1" "${a%% *}" "${b%% *}" "$r"
+    printf '%-30s %10s %10s  %s  %s %s\n' "$1" "${a%% *}" "${b%% *}" "$r" "${a##* }" "${b##* }"
   }
   for spec in "${TABLES[@]}"; do
     IFS='|' read -r t pk _ _ <<<"$spec"
